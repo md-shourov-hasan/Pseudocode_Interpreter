@@ -1,0 +1,402 @@
+"""
+Parser for the IGCSE Pseudocode Compiler (Milestone 2).
+
+Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
+
+    program     := (statement? NEWLINE)* EOF
+    statement   := declare_stmt | constant_stmt | input_stmt | output_stmt
+                 | if_stmt | case_stmt | assignment_stmt
+
+    declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON data_type
+    constant_stmt  := CONSTANT IDENTIFIER ASSIGN expression
+    input_stmt     := INPUT IDENTIFIER
+    output_stmt    := OUTPUT expression ( ',' expression )*
+    if_stmt        := IF expression THEN block ( ELSE block )? ENDIF        -- FR-7.1, FR-7.2
+    case_stmt      := CASE OF IDENTIFIER (case_value COLON statement)*
+                       ( OTHERWISE statement )? ENDCASE                     -- FR-7.3, FR-7.4
+    case_value     := '-'? literal
+    assignment_stmt:= IDENTIFIER ASSIGN expression
+    data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
+
+    expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
+    or_expr     := and_expr ( OR and_expr )*
+    and_expr    := not_expr ( AND not_expr )*
+    not_expr    := NOT not_expr | relational
+    relational  := additive ( relop additive )?          -- FR-5.4, non-chaining
+    additive    := term ( ('+' | '-') term )*             -- FR-5.1
+    term        := unary ( ('*' | '/') unary )*           -- FR-5.1
+    unary       := '-' unary | power
+    power       := primary ( '^' unary )?                 -- right-associative
+    primary     := INTEGER_LITERAL | REAL_LITERAL | CHAR_LITERAL
+                 | STRING_LITERAL | BOOLEAN_LITERAL
+                 | IDENTIFIER ( '(' arglist? ')' | '[' arglist ']' )?
+                 | '(' expression ')'
+    arglist     := expression ( ',' expression )*
+
+Array declarations (DECLARE x : ARRAY[...] OF ...) and indexed
+assignment targets (x[i] <- v) are deferred to Milestone 7; a DECLARE
+or assignment using them currently raises a clear "not supported yet"
+PseudocodeError rather than silently mis-parsing.
+"""
+
+from .tokens import Token, TokenType
+from .errors import PseudocodeError
+from . import ast_nodes as ast
+
+_DATA_TYPE_TOKENS = {
+    TokenType.INTEGER: "INTEGER",
+    TokenType.REAL: "REAL",
+    TokenType.CHAR: "CHAR",
+    TokenType.STRING: "STRING",
+    TokenType.BOOLEAN: "BOOLEAN",
+}
+
+_RELATIONAL_TOKENS = {
+    TokenType.EQUAL: "=",
+    TokenType.LESS_THAN: "<",
+    TokenType.LESS_EQUAL: "<=",
+    TokenType.GREATER_THAN: ">",
+    TokenType.GREATER_EQUAL: ">=",
+    TokenType.NOT_EQUAL: "<>",
+}
+
+_LITERAL_TYPE_OF = {
+    TokenType.INTEGER_LITERAL: "INTEGER",
+    TokenType.REAL_LITERAL: "REAL",
+    TokenType.CHAR_LITERAL: "CHAR",
+    TokenType.STRING_LITERAL: "STRING",
+    TokenType.BOOLEAN_LITERAL: "BOOLEAN",
+}
+
+
+class Parser:
+    def __init__(self, tokens: list[Token]):
+        self.tokens = tokens
+        self.pos = 0
+
+    # ---- token helpers -----------------------------------------------
+
+    def _peek(self, offset: int = 0) -> Token:
+        i = min(self.pos + offset, len(self.tokens) - 1)
+        return self.tokens[i]
+
+    def _advance(self) -> Token:
+        tok = self.tokens[self.pos]
+        if tok.type != TokenType.EOF:
+            self.pos += 1
+        return tok
+
+    def _check(self, type_: TokenType) -> bool:
+        return self._peek().type == type_
+
+    def _match(self, *types: TokenType) -> bool:
+        if self._peek().type in types:
+            self._advance()
+            return True
+        return False
+
+    def _expect(self, type_: TokenType, message: str) -> Token:
+        if self._check(type_):
+            return self._advance()
+        found = self._peek()
+        raise PseudocodeError(found.line, f"{message} (found '{found.lexeme or found.type.name}').")
+
+    # ---- program / statements ------------------------------------------
+
+    def parse(self) -> ast.Program:
+        statements = self._block(stop_types=frozenset())
+        return ast.Program(statements)
+
+    def _skip_newlines(self):
+        while self._match(TokenType.NEWLINE):
+            pass
+
+    def _block(self, stop_types: frozenset) -> list:
+        """Parse statements until EOF or a token in `stop_types` is seen
+        (the stop token itself is left unconsumed)."""
+        statements = []
+        self._skip_newlines()
+        while not self._check(TokenType.EOF) and self._peek().type not in stop_types:
+            statements.append(self._statement())
+            self._end_of_statement()
+            self._skip_newlines()
+        return statements
+
+    def _end_of_statement(self):
+        """A statement must be followed by a newline or EOF."""
+        if self._check(TokenType.EOF):
+            return
+        self._expect(TokenType.NEWLINE, "Expected the end of this line")
+
+    def _statement(self):
+        tok = self._peek()
+        if tok.type == TokenType.DECLARE:
+            return self._declare_statement()
+        if tok.type == TokenType.CONSTANT:
+            return self._constant_statement()
+        if tok.type == TokenType.INPUT:
+            return self._input_statement()
+        if tok.type == TokenType.OUTPUT:
+            return self._output_statement()
+        if tok.type == TokenType.IF:
+            return self._if_statement()
+        if tok.type == TokenType.CASE:
+            return self._case_statement()
+        if tok.type == TokenType.IDENTIFIER:
+            return self._assignment_statement()
+        raise PseudocodeError(
+            tok.line,
+            f"Expected a statement here, but found '{tok.lexeme or tok.type.name}'.",
+        )
+
+    def _declare_statement(self):
+        line = self._advance().line  # consume DECLARE
+        names = [self._expect(TokenType.IDENTIFIER, "Expected an identifier after DECLARE").lexeme]
+        while self._match(TokenType.COMMA):
+            names.append(self._expect(TokenType.IDENTIFIER, "Expected an identifier after ','").lexeme)
+        self._expect(TokenType.COLON, "Expected ':' after the identifier(s) in a DECLARE statement")
+
+        if self._check(TokenType.ARRAY):
+            raise PseudocodeError(
+                line,
+                "Array declarations (ARRAY[...] OF ...) aren't supported yet — coming in a later milestone.",
+            )
+
+        type_tok = self._peek()
+        if type_tok.type not in _DATA_TYPE_TOKENS:
+            raise PseudocodeError(
+                type_tok.line,
+                f"Expected a data type (INTEGER, REAL, CHAR, STRING, or BOOLEAN), "
+                f"but found '{type_tok.lexeme or type_tok.type.name}'.",
+            )
+        self._advance()
+        return ast.Declare(names, _DATA_TYPE_TOKENS[type_tok.type], line)
+
+    def _constant_statement(self):
+        line = self._advance().line  # consume CONSTANT
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after CONSTANT")
+        self._expect(TokenType.ASSIGN, "Expected '<-' after the identifier in a CONSTANT statement")
+        value = self._expression()
+        return ast.Constant(name_tok.lexeme, value, line)
+
+    def _input_statement(self):
+        line = self._advance().line  # consume INPUT
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after INPUT")
+        return ast.Input(name_tok.lexeme, line)
+
+    def _output_statement(self):
+        line = self._advance().line  # consume OUTPUT
+        values = [self._expression()]
+        while self._match(TokenType.COMMA):
+            values.append(self._expression())
+        return ast.Output(values, line)
+
+    def _if_statement(self):
+        """IF <condition> [NEWLINE] THEN [NEWLINE] <block> [ELSE [NEWLINE] <block>] ENDIF   (FR-7.1, FR-7.2)"""
+        line = self._advance().line  # consume IF
+        condition = self._expression()
+        self._skip_newlines()  # THEN is conventionally on its own line, but same-line is fine too
+        self._expect(TokenType.THEN, "Expected THEN after the IF condition")
+        then_body = self._block(frozenset({TokenType.ELSE, TokenType.ENDIF}))
+
+        else_body = []
+        if self._check(TokenType.ELSE):
+            self._advance()
+            else_body = self._block(frozenset({TokenType.ENDIF}))
+
+        if not self._check(TokenType.ENDIF):
+            raise PseudocodeError(
+                line, "This IF statement is missing its matching ENDIF."
+            )
+        self._advance()  # consume ENDIF
+        return ast.If(condition, then_body, else_body, line)
+
+    def _case_statement(self):
+        """CASE OF <identifier> (<value> : <statement>)* [OTHERWISE <statement>] ENDCASE   (FR-7.3, FR-7.4)"""
+        line = self._advance().line  # consume CASE
+        self._expect(TokenType.OF, "Expected OF after CASE")
+        subject_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after CASE OF")
+
+        branches = []
+        otherwise_stmt = None
+        self._skip_newlines()
+        while not self._check(TokenType.EOF) and self._peek().type not in (
+            TokenType.OTHERWISE,
+            TokenType.ENDCASE,
+        ):
+            value_node = self._case_value()
+            self._expect(TokenType.COLON, "Expected ':' after the CASE value")
+            branch_stmt = self._statement()
+            branches.append((value_node, branch_stmt))
+            self._end_of_statement()
+            self._skip_newlines()
+
+        if self._check(TokenType.OTHERWISE):
+            self._advance()
+            otherwise_stmt = self._statement()
+            self._end_of_statement()
+            self._skip_newlines()
+
+        if not self._check(TokenType.ENDCASE):
+            raise PseudocodeError(
+                line, "This CASE OF statement is missing its matching ENDCASE."
+            )
+        self._advance()  # consume ENDCASE
+        return ast.Case(subject_tok.lexeme, branches, otherwise_stmt, line)
+
+    def _case_value(self):
+        """A CASE branch's value must be a literal (optionally negative),
+        not a general expression — the syntax guide only shows literals."""
+        tok = self._peek()
+        if tok.type == TokenType.MINUS:
+            self._advance()
+            operand = self._case_value()
+            return ast.UnaryOp("-", operand, tok.line)
+        if tok.type in _LITERAL_TYPE_OF:
+            self._advance()
+            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line)
+        raise PseudocodeError(
+            tok.line,
+            f"Expected a literal value for this CASE branch, but found '{tok.lexeme or tok.type.name}'.",
+        )
+
+    def _assignment_statement(self):
+        name_tok = self._advance()  # consume IDENTIFIER
+        if self._check(TokenType.LBRACKET):
+            raise PseudocodeError(
+                name_tok.line,
+                "Assigning to an array element (e.g. Grade[16, 3] <- 'A') isn't supported yet — "
+                "coming in a later milestone.",
+            )
+        self._expect(TokenType.ASSIGN, "Expected '<-' to assign a value")
+        value = self._expression()
+        target = ast.Identifier(name_tok.lexeme, name_tok.line)
+        return ast.Assignment(target, value, name_tok.line)
+
+    # ---- expressions (precedence climbing) -----------------------------
+    #
+    # Boolean connectives (extension beyond the reference syntax guide,
+    # added on request) sit above relational comparisons:
+    #   expression := or_expr
+    #   or_expr     := and_expr ( OR and_expr )*
+    #   and_expr    := not_expr ( AND not_expr )*
+    #   not_expr    := NOT not_expr | relational
+    # so "A = 1 AND (B = 2 OR C <> 3)" groups as
+    # (A = 1) AND ((B = 2) OR (C <> 3)), and parentheses override this
+    # exactly as they do for arithmetic. AND/OR evaluate both sides
+    # (no short-circuiting) — see Interpreter._eval_logical.
+
+    def _expression(self):
+        return self._or_expr()
+
+    def _or_expr(self):
+        left = self._and_expr()
+        while self._check(TokenType.OR):
+            tok = self._advance()
+            right = self._and_expr()
+            left = ast.BinaryOp("OR", left, right, tok.line)
+        return left
+
+    def _and_expr(self):
+        left = self._not_expr()
+        while self._check(TokenType.AND):
+            tok = self._advance()
+            right = self._not_expr()
+            left = ast.BinaryOp("AND", left, right, tok.line)
+        return left
+
+    def _not_expr(self):
+        if self._check(TokenType.NOT):
+            tok = self._advance()
+            operand = self._not_expr()
+            return ast.UnaryOp("NOT", operand, tok.line)
+        return self._relational()
+
+    def _relational(self):
+        left = self._additive()
+        tok = self._peek()
+        if tok.type in _RELATIONAL_TOKENS:
+            self._advance()
+            right = self._additive()
+            left = ast.BinaryOp(_RELATIONAL_TOKENS[tok.type], left, right, tok.line)
+        return left
+
+    def _additive(self):
+        left = self._term()
+        while self._peek().type in (TokenType.PLUS, TokenType.MINUS):
+            op_tok = self._advance()
+            right = self._term()
+            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line)
+        return left
+
+    def _term(self):
+        left = self._unary()
+        while self._peek().type in (TokenType.MULTIPLY, TokenType.DIVIDE):
+            op_tok = self._advance()
+            right = self._unary()
+            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line)
+        return left
+
+    def _unary(self):
+        if self._check(TokenType.MINUS):
+            op_tok = self._advance()
+            operand = self._unary()
+            return ast.UnaryOp("-", operand, op_tok.line)
+        return self._power()
+
+    def _power(self):
+        base = self._primary()
+        if self._check(TokenType.POWER):
+            op_tok = self._advance()
+            exponent = self._unary()  # right-associative
+            return ast.BinaryOp("^", base, exponent, op_tok.line)
+        return base
+
+    def _primary(self):
+        tok = self._peek()
+
+        if tok.type in _LITERAL_TYPE_OF:
+            self._advance()
+            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line)
+
+        if tok.type == TokenType.LPAREN:
+            self._advance()
+            expr = self._expression()
+            self._expect(TokenType.RPAREN, "Expected ')' to close this expression")
+            return expr
+
+        if tok.type == TokenType.IDENTIFIER:
+            self._advance()
+            if self._check(TokenType.LPAREN):
+                return self._finish_call(tok)
+            if self._check(TokenType.LBRACKET):
+                return self._finish_index(tok)
+            return ast.Identifier(tok.lexeme, tok.line)
+
+        raise PseudocodeError(
+            tok.line,
+            f"Expected a value or expression here, but found '{tok.lexeme or tok.type.name}'.",
+        )
+
+    def _finish_call(self, name_tok: Token):
+        self._advance()  # consume '('
+        args = []
+        if not self._check(TokenType.RPAREN):
+            args.append(self._expression())
+            while self._match(TokenType.COMMA):
+                args.append(self._expression())
+        self._expect(TokenType.RPAREN, f"Expected ')' to close the call to {name_tok.lexeme}")
+        return ast.Call(name_tok.lexeme, args, name_tok.line)
+
+    def _finish_index(self, name_tok: Token):
+        self._advance()  # consume '['
+        indices = [self._expression()]
+        while self._match(TokenType.COMMA):
+            indices.append(self._expression())
+        self._expect(TokenType.RBRACKET, f"Expected ']' to close the index into {name_tok.lexeme}")
+        return ast.Index(name_tok.lexeme, indices, name_tok.line)
+
+
+def parse(tokens: list[Token]) -> ast.Program:
+    """Convenience wrapper: parse a full token list into a Program."""
+    return Parser(tokens).parse()

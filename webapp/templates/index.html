@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IGCSE Pseudocode Compiler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">&lt;/&gt;</span>
+    <span class="brand-name">IGCSE Pseudocode Compiler</span>
+  </div>
+
+  <div class="status" id="status">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-label">Idle</span>
+  </div>
+
+  <button id="run-btn" class="run-btn">
+    <span class="run-icon">&#9654;</span> Run
+  </button>
+</header>
+
+<main class="workspace">
+
+  <section class="pane editor-pane">
+    <div class="pane-header">Source</div>
+    <div class="editor-wrap">
+      <div class="gutter" id="gutter">1</div>
+      <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off"
+        autocomplete="off" autocorrect="off"
+        data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"></textarea>
+    </div>
+  </section>
+
+  <section class="pane console-pane">
+    <div class="pane-header">Output</div>
+    <div class="console" id="console"></div>
+    <form id="input-row" class="input-row hidden" autocomplete="off">
+      <span class="input-caret">&gt;</span>
+      <input id="input-field" class="input-field" type="text" placeholder="Enter a value…" autofocus>
+      <button type="submit" class="input-send">Send</button>
+    </form>
+  </section>
+
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
