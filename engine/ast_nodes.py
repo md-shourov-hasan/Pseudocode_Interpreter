@@ -5,9 +5,10 @@ Kept as plain dataclasses with no behaviour — the interpreter (Milestone
 3+) is what gives these meaning. Every node carries `line` so runtime
 errors can be reported against the original source line (NFR-10).
 
-Node coverage in this milestone (Milestone 2):
-    Program, Declare, Constant, Assignment,
-    Literal, Identifier, UnaryOp, BinaryOp, Call, Index
+Node coverage: Program, Declare, Constant, Input, Output, If, Case,
+Assignment, ForLoop, RepeatLoop, WhileLoop (statements — added across
+Milestones 2, 5, 6), and Literal, Identifier, UnaryOp, BinaryOp, Call,
+Index (expressions — added in Milestone 2).
 
 Call and Index are parsed now (they're pure syntax: `name(...)` /
 `name[...]`) but not yet given meaning — built-in functions arrive in
@@ -92,6 +93,37 @@ class Assignment:
     """
     target: object
     value: object
+    line: int
+
+
+@dataclass
+class ForLoop:
+    """FOR <identifier> <- <start> TO <finish> [STEP <step>] ... NEXT <identifier>
+    (FR-6.1, FR-6.2, FR-6.3). `step` is None when no STEP clause was
+    written (the interpreter defaults it to 1)."""
+    variable: str
+    start: object
+    finish: object
+    step: object
+    body: list
+    line: int
+
+
+@dataclass
+class RepeatLoop:
+    """REPEAT ... UNTIL <condition>   (FR-6.4) — post-conditional: the
+    body always runs at least once, then stops once condition is TRUE."""
+    body: list
+    until_condition: object
+    line: int
+
+
+@dataclass
+class WhileLoop:
+    """WHILE <condition> DO ... ENDWHILE   (FR-6.5) — pre-conditional:
+    the condition is tested before every iteration, including the first."""
+    condition: object
+    body: list
     line: int
 
 

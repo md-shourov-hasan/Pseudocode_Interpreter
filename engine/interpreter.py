@@ -27,6 +27,12 @@ Implements:
     FR-5.8        SUBSTRING(string, start, length) — 1-based, inclusive
     FR-11.2       Undeclared identifier -> error, not silent execution
     FR-11.3       Incompatible assignment -> error, not silent execution
+    FR-6.1        FOR <var> <- <start> TO <finish> ... NEXT <var>
+    FR-6.2        start == finish runs once; start "past" finish (for the
+                  step's direction) runs zero times
+    FR-6.3        Optional STEP <increment>, ascending or descending
+    FR-6.4        REPEAT ... UNTIL <condition> — runs at least once
+    FR-6.5        WHILE <condition> DO ... ENDWHILE — may run zero times
     (ext)         AND / OR / NOT boolean connectives in conditions,
                   requested beyond the reference syntax guide
 
@@ -38,8 +44,16 @@ Two deliberate deviations from strict type-mismatch behaviour
   - OUTPUT of a REAL value is rounded to at most 5 decimal places,
     with insignificant trailing zeros trimmed.
 
-Not yet implemented (later milestones): iteration (M6), arrays (M7),
+Not yet implemented (later milestones): arrays (M7),
 procedures/functions (M8), file handling (M9).
+
+NFR-3 note: loops make genuine infinite loops possible for the first
+time (e.g. a WHILE whose condition never becomes FALSE). This
+interpreter does not yet enforce an execution time limit or iteration
+cap itself — that hard-termination work is Milestone 11's. The web
+frontend's run_session.py can currently only *report* a timeout after
+the fact, not stop a runaway thread; treat that as a known gap until
+M11, not a guarantee.
 
 Design: a tree-walking interpreter. `Interpreter.run(program)` executes
 every statement in order and returns the list of OUTPUT lines produced
@@ -153,6 +167,11 @@ class Interpreter:
                 f"'{name}' is a CONSTANT and cannot be reassigned.",
             )
         value = self._eval(stmt.value)
+        self._store(symbol, value, stmt.line, name)
+
+    def _store(self, symbol, value, line, name):
+        """Shared type-checked store used by plain assignment and by the
+        FOR loop's per-iteration update of its loop variable."""
         # A REAL result (e.g. from "/") assigned into an INTEGER variable is
         # narrowed by truncating toward zero, rather than treated as a type
         # error — this is a deliberate product decision (requested), since
@@ -160,7 +179,7 @@ class Interpreter:
         # arithmetic even when the mathematical quotient looks INTEGER-like.
         if symbol.data_type == "INTEGER" and isinstance(value, float) and not isinstance(value, bool):
             value = int(value)
-        self._check_assignable(symbol.data_type, value, stmt.line, name)
+        self._check_assignable(symbol.data_type, value, line, name)
         # INTEGER assigned into a REAL variable is widened, per FR-2.2 semantics.
         if symbol.data_type == "REAL" and isinstance(value, int) and not isinstance(value, bool):
             value = float(value)
@@ -187,6 +206,66 @@ class Interpreter:
     def _exec_output(self, stmt):
         parts = [self._format_value(self._eval(v)) for v in stmt.values]
         self._output_fn("".join(parts))
+
+    def _exec_for(self, stmt: ast.ForLoop):
+        start = self._eval(stmt.start)
+        finish = self._eval(stmt.finish)
+        step = self._eval(stmt.step) if stmt.step is not None else 1
+        self._expect_integer("FOR", start, stmt.line, "start value")
+        self._expect_integer("FOR", finish, stmt.line, "finish value")
+        self._expect_integer("FOR", step, stmt.line, "STEP value")
+        if step == 0:
+            raise PseudocodeError(
+                stmt.line, "A FOR loop's STEP value cannot be 0 (it would never finish)."
+            )
+
+        symbol = self.symbols.get(stmt.variable)
+        if symbol is None:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{stmt.variable}' is used here but was never declared with DECLARE.",
+            )
+        if symbol.is_constant:
+            raise PseudocodeError(
+                stmt.line, f"'{stmt.variable}' is a CONSTANT and cannot be used as a FOR loop variable."
+            )
+
+        # FR-6.2: start == finish runs the body exactly once; start "past"
+        # finish for the step's direction runs it zero times. Ascending
+        # (step > 0) and descending (step < 0) are handled symmetrically.
+        value = start
+        ascending = step > 0
+        while (value <= finish) if ascending else (value >= finish):
+            self._store(symbol, value, stmt.line, stmt.variable)
+            for s in stmt.body:
+                self._exec_statement(s)
+            value += step
+
+    def _exec_repeat(self, stmt: ast.RepeatLoop):
+        while True:
+            for s in stmt.body:
+                self._exec_statement(s)
+            condition = self._eval(stmt.until_condition)
+            if not isinstance(condition, bool):
+                raise PseudocodeError(
+                    stmt.line,
+                    f"The UNTIL condition must evaluate to a BOOLEAN value, but got {self._type_name(condition)}.",
+                )
+            if condition:
+                break
+
+    def _exec_while(self, stmt: ast.WhileLoop):
+        while True:
+            condition = self._eval(stmt.condition)
+            if not isinstance(condition, bool):
+                raise PseudocodeError(
+                    stmt.line,
+                    f"The WHILE condition must evaluate to a BOOLEAN value, but got {self._type_name(condition)}.",
+                )
+            if not condition:
+                break
+            for s in stmt.body:
+                self._exec_statement(s)
 
     def _exec_if(self, stmt: ast.If):
         condition = self._eval(stmt.condition)
@@ -543,6 +622,9 @@ Interpreter._STATEMENT_HANDLERS = {
     ast.Output: Interpreter._exec_output,
     ast.If: Interpreter._exec_if,
     ast.Case: Interpreter._exec_case,
+    ast.ForLoop: Interpreter._exec_for,
+    ast.RepeatLoop: Interpreter._exec_repeat,
+    ast.WhileLoop: Interpreter._exec_while,
 }
 
 Interpreter._EXPR_HANDLERS = {

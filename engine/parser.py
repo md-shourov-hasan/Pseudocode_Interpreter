@@ -5,7 +5,8 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
 
     program     := (statement? NEWLINE)* EOF
     statement   := declare_stmt | constant_stmt | input_stmt | output_stmt
-                 | if_stmt | case_stmt | assignment_stmt
+                 | if_stmt | case_stmt | for_stmt | repeat_stmt | while_stmt
+                 | assignment_stmt
 
     declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON data_type
     constant_stmt  := CONSTANT IDENTIFIER ASSIGN expression
@@ -15,6 +16,10 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     case_stmt      := CASE OF IDENTIFIER (case_value COLON statement)*
                        ( OTHERWISE statement )? ENDCASE                     -- FR-7.3, FR-7.4
     case_value     := '-'? literal
+    for_stmt       := FOR IDENTIFIER ASSIGN expression TO expression
+                       ( STEP expression )? block NEXT IDENTIFIER           -- FR-6.1, FR-6.2, FR-6.3
+    repeat_stmt    := REPEAT block UNTIL expression                         -- FR-6.4
+    while_stmt     := WHILE expression DO block ENDWHILE                    -- FR-6.5
     assignment_stmt:= IDENTIFIER ASSIGN expression
     data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
 
@@ -142,6 +147,12 @@ class Parser:
             return self._if_statement()
         if tok.type == TokenType.CASE:
             return self._case_statement()
+        if tok.type == TokenType.FOR:
+            return self._for_statement()
+        if tok.type == TokenType.REPEAT:
+            return self._repeat_statement()
+        if tok.type == TokenType.WHILE:
+            return self._while_statement()
         if tok.type == TokenType.IDENTIFIER:
             return self._assignment_statement()
         raise PseudocodeError(
@@ -190,6 +201,56 @@ class Parser:
         while self._match(TokenType.COMMA):
             values.append(self._expression())
         return ast.Output(values, line)
+
+    def _for_statement(self):
+        """FOR <identifier> <- <start> TO <finish> [STEP <step>] ... NEXT <identifier>
+        (FR-6.1, FR-6.2, FR-6.3)."""
+        line = self._advance().line  # consume FOR
+        var_tok = self._expect(TokenType.IDENTIFIER, "Expected the loop variable after FOR")
+        self._expect(TokenType.ASSIGN, "Expected '<-' after the loop variable in a FOR statement")
+        start = self._expression()
+        self._expect(TokenType.TO, "Expected TO after the FOR loop's start value")
+        finish = self._expression()
+
+        step = None
+        if self._check(TokenType.STEP):
+            self._advance()
+            step = self._expression()
+
+        body = self._block(frozenset({TokenType.NEXT}))
+        if not self._check(TokenType.NEXT):
+            raise PseudocodeError(line, "This FOR statement is missing its matching NEXT.")
+        self._advance()  # consume NEXT
+        next_name_tok = self._expect(TokenType.IDENTIFIER, "Expected the loop variable's name after NEXT")
+        if next_name_tok.lexeme != var_tok.lexeme:
+            raise PseudocodeError(
+                next_name_tok.line,
+                f"NEXT {next_name_tok.lexeme} doesn't match the loop variable "
+                f"'{var_tok.lexeme}' from the FOR statement.",
+            )
+        return ast.ForLoop(var_tok.lexeme, start, finish, step, body, line)
+
+    def _repeat_statement(self):
+        """REPEAT ... UNTIL <condition>   (FR-6.4)"""
+        line = self._advance().line  # consume REPEAT
+        body = self._block(frozenset({TokenType.UNTIL}))
+        if not self._check(TokenType.UNTIL):
+            raise PseudocodeError(line, "This REPEAT statement is missing its matching UNTIL.")
+        self._advance()  # consume UNTIL
+        condition = self._expression()
+        return ast.RepeatLoop(body, condition, line)
+
+    def _while_statement(self):
+        """WHILE <condition> DO ... ENDWHILE   (FR-6.5)"""
+        line = self._advance().line  # consume WHILE
+        condition = self._expression()
+        self._skip_newlines()  # DO is conventionally same-line, but allow either
+        self._expect(TokenType.DO, "Expected DO after the WHILE condition")
+        body = self._block(frozenset({TokenType.ENDWHILE}))
+        if not self._check(TokenType.ENDWHILE):
+            raise PseudocodeError(line, "This WHILE statement is missing its matching ENDWHILE.")
+        self._advance()  # consume ENDWHILE
+        return ast.WhileLoop(condition, body, line)
 
     def _if_statement(self):
         """IF <condition> [NEWLINE] THEN [NEWLINE] <block> [ELSE [NEWLINE] <block>] ENDIF   (FR-7.1, FR-7.2)"""
