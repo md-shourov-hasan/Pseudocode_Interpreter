@@ -19,10 +19,10 @@ OUTPUT "What is 7 + 5?"
 INPUT Answer
 
 IF Answer = CorrectAnswer THEN
- Score <- Score + 1
- OUTPUT "Correct!"
+    Score <- Score + 1
+    OUTPUT "Correct!"
 ELSE
- OUTPUT "Not quite - the answer was ", CorrectAnswer
+    OUTPUT "Not quite - the answer was ", CorrectAnswer
 ENDIF
 
 OUTPUT "Score: ", Score
