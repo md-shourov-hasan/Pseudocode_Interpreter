@@ -155,9 +155,13 @@ def test_input_type_mismatch_is_error():
 
 # ---- not-yet-implemented features fail clearly, not silently -------------
 
-def test_calling_a_function_is_a_clear_not_yet_error():
+def test_calling_an_unknown_function_is_a_clear_not_yet_error():
+    # ROUND itself is a real built-in as of Milestone 4 (see
+    # test_library_functions.py); this checks the fallback path for a
+    # name that isn't one of the built-ins and isn't a user-defined
+    # procedure/function either (Milestone 8).
     with pytest.raises(PseudocodeError, match="later milestone"):
-        run_src("DECLARE X : REAL\nX <- ROUND(3.14159, 2)")
+        run_src("DECLARE X : REAL\nX <- MYSTERYFUNC(3.14159, 2)")
 
 
 def test_indexing_an_array_is_a_clear_not_yet_error():

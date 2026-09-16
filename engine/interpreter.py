@@ -17,6 +17,14 @@ Implements:
     FR-7.2        IF ... THEN ... ELSE ... ENDIF
     FR-7.3        CASE OF ... ENDCASE, first matching value wins
     FR-7.4        CASE OF ... OTHERWISE ... ENDCASE
+    FR-4.3        ROUND(value, places)
+    FR-4.4        RANDOM() — random REAL in [0, 1]
+    FR-5.2        DIV(dividend, divisor) — truncated integer quotient
+    FR-5.3        MOD(dividend, divisor) — truncated-division remainder
+    FR-5.5        LENGTH(string)
+    FR-5.6        LCASE(string/char)
+    FR-5.7        UCASE(string/char)
+    FR-5.8        SUBSTRING(string, start, length) — 1-based, inclusive
     FR-11.2       Undeclared identifier -> error, not silent execution
     FR-11.3       Incompatible assignment -> error, not silent execution
     (ext)         AND / OR / NOT boolean connectives in conditions,
@@ -30,9 +38,8 @@ Two deliberate deviations from strict type-mismatch behaviour
   - OUTPUT of a REAL value is rounded to at most 5 decimal places,
     with insignificant trailing zeros trimmed.
 
-Not yet implemented (later milestones): library functions (M4),
-iteration (M6), arrays (M7), procedures/functions (M8), file
-handling (M9).
+Not yet implemented (later milestones): iteration (M6), arrays (M7),
+procedures/functions (M8), file handling (M9).
 
 Design: a tree-walking interpreter. `Interpreter.run(program)` executes
 every statement in order and returns the list of OUTPUT lines produced
@@ -42,8 +49,11 @@ INPUT is satisfied by an injectable `input_fn` so tests don't need a
 real stdin/stdout, and so Milestone 12 can wire it up to a web prompt.
 """
 
+import random
+
 from . import ast_nodes as ast
 from .errors import PseudocodeError
+from .tokens import BUILTIN_FUNCTIONS
 
 # Default value each data type gets when DECLAREd, before assignment.
 _DEFAULT_VALUE = {
@@ -319,10 +329,117 @@ class Interpreter:
             )
 
     def _eval_call(self, node: ast.Call):
-        raise PseudocodeError(
-            node.line,
-            f"'{node.name}(...)' isn't supported yet — built-in functions arrive in a later milestone.",
-        )
+        name = node.name
+        if name not in BUILTIN_FUNCTIONS:
+            raise PseudocodeError(
+                node.line,
+                f"'{name}(...)' isn't a recognized built-in function, and user-defined "
+                f"procedures/functions aren't supported yet — coming in a later milestone.",
+            )
+        args = [self._eval(a) for a in node.args]
+        return self._BUILTIN_HANDLERS[name](self, args, node.line)
+
+    # ---- library functions (FR-4.3, FR-4.4, FR-5.2, FR-5.3, FR-5.5-5.8) ---
+
+    def _expect_arg_count(self, name, args, expected, line):
+        if len(args) != expected:
+            word = "argument" if expected == 1 else "arguments"
+            raise PseudocodeError(
+                line, f"{name}(...) needs {expected} {word}, but got {len(args)}."
+            )
+
+    def _expect_numeric(self, name, value, line, which="argument"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PseudocodeError(
+                line, f"{name}'s {which} must be INTEGER or REAL, but got {self._type_name(value)}."
+            )
+
+    def _expect_integer(self, name, value, line, which="argument"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise PseudocodeError(
+                line, f"{name}'s {which} must be INTEGER, but got {self._type_name(value)}."
+            )
+
+    def _expect_string(self, name, value, line, which="argument"):
+        if not isinstance(value, str):
+            raise PseudocodeError(
+                line, f"{name}'s {which} must be STRING or CHAR, but got {self._type_name(value)}."
+            )
+
+    def _builtin_round(self, args, line):
+        self._expect_arg_count("ROUND", args, 2, line)
+        value, places = args
+        self._expect_numeric("ROUND", value, line, "first argument")
+        self._expect_integer("ROUND", places, line, "second argument (places)")
+        return round(float(value), places)
+
+    def _builtin_random(self, args, line):
+        self._expect_arg_count("RANDOM", args, 0, line)
+        # Python's random.random() gives [0, 1) — 1.0 itself is only ever
+        # reached in the limit, never actually returned. Close enough to
+        # the spec's "0 and 1 inclusive" for practical/educational use.
+        return random.random()
+
+    def _truncating_divmod(self, name, args, line):
+        """Shared DIV/MOD helper: truncated-toward-zero division (matching
+        "the fractional part discarded"), computed with plain integer
+        arithmetic so large dividends never lose precision going through
+        a float, unlike Python's own floor-based // and %."""
+        self._expect_arg_count(name, args, 2, line)
+        dividend, divisor = args
+        self._expect_integer(name, dividend, line, "first argument (dividend)")
+        self._expect_integer(name, divisor, line, "second argument (divisor)")
+        if divisor == 0:
+            raise PseudocodeError(line, f"{name}: division by zero.")
+        quotient = abs(dividend) // abs(divisor)
+        if (dividend < 0) != (divisor < 0):
+            quotient = -quotient
+        remainder = dividend - divisor * quotient
+        return quotient, remainder
+
+    def _builtin_div(self, args, line):
+        quotient, _ = self._truncating_divmod("DIV", args, line)
+        return quotient
+
+    def _builtin_mod(self, args, line):
+        _, remainder = self._truncating_divmod("MOD", args, line)
+        return remainder
+
+    def _builtin_length(self, args, line):
+        self._expect_arg_count("LENGTH", args, 1, line)
+        (value,) = args
+        self._expect_string("LENGTH", value, line)
+        return len(value)
+
+    def _builtin_lcase(self, args, line):
+        self._expect_arg_count("LCASE", args, 1, line)
+        (value,) = args
+        self._expect_string("LCASE", value, line)
+        return value.lower()
+
+    def _builtin_ucase(self, args, line):
+        self._expect_arg_count("UCASE", args, 1, line)
+        (value,) = args
+        self._expect_string("UCASE", value, line)
+        return value.upper()
+
+    def _builtin_substring(self, args, line):
+        self._expect_arg_count("SUBSTRING", args, 3, line)
+        text, start, length = args
+        self._expect_string("SUBSTRING", text, line, "first argument")
+        self._expect_integer("SUBSTRING", start, line, "second argument (start)")
+        self._expect_integer("SUBSTRING", length, line, "third argument (length)")
+        if start < 1 or length < 1:
+            raise PseudocodeError(
+                line, "SUBSTRING's start and length must both be positive integers."
+            )
+        if start - 1 + length > len(text):
+            raise PseudocodeError(
+                line,
+                f"SUBSTRING's start ({start}) and length ({length}) go past the end "
+                f"of a {len(text)}-character value.",
+            )
+        return text[start - 1 : start - 1 + length]
 
     def _eval_index(self, node: ast.Index):
         raise PseudocodeError(
@@ -415,6 +532,7 @@ class Interpreter:
 
     _STATEMENT_HANDLERS = {}
     _EXPR_HANDLERS = {}
+    _BUILTIN_HANDLERS = {}
 
 
 Interpreter._STATEMENT_HANDLERS = {
@@ -434,6 +552,17 @@ Interpreter._EXPR_HANDLERS = {
     ast.BinaryOp: Interpreter._eval_binary,
     ast.Call: Interpreter._eval_call,
     ast.Index: Interpreter._eval_index,
+}
+
+Interpreter._BUILTIN_HANDLERS = {
+    "ROUND": Interpreter._builtin_round,
+    "RANDOM": Interpreter._builtin_random,
+    "DIV": Interpreter._builtin_div,
+    "MOD": Interpreter._builtin_mod,
+    "LENGTH": Interpreter._builtin_length,
+    "LCASE": Interpreter._builtin_lcase,
+    "UCASE": Interpreter._builtin_ucase,
+    "SUBSTRING": Interpreter._builtin_substring,
 }
 
 
