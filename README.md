@@ -1,2 +1,0 @@
-# pseudocode_compiler
-

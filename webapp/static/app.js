@@ -18,8 +18,7 @@ Score <- 0
 OUTPUT "What is 7 + 5?"
 INPUT Answer
 
-IF Answer = CorrectAnswer
-THEN
+IF Answer = CorrectAnswer THEN
  Score <- Score + 1
  OUTPUT "Correct!"
 ELSE
