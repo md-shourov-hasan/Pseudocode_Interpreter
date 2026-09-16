@@ -81,11 +81,18 @@ editor.addEventListener("scroll", () => {
 // Indentation unit is 4 spaces. Tab/Shift+Tab indent or outdent the
 // current line (or every line touched by a selection). Enter carries
 // the current line's indentation forward, and adds one extra level
-// when the line being finished ends with THEN (an IF block is being
-// opened) — more block-opening keywords (loops, etc.) will extend this
-// same rule as those constructs are added.
+// when the line being finished opens a block: IF ... THEN, ELSE,
+// WHILE ... DO, REPEAT (on its own), or a FOR header line — more
+// block-opening keywords will extend this same rule as those
+// constructs are added.
 const INDENT = "    ";
-const INDENT_TRIGGERS = [/\bTHEN\s*$/, /\bELSE\s*$/];
+const INDENT_TRIGGERS = [
+  /\bTHEN\s*$/, // IF <condition> THEN
+  /\bELSE\s*$/, // ELSE
+  /\bDO\s*$/, // WHILE <condition> DO
+  /^REPEAT$/, // REPEAT (the whole line, body follows)
+  /^FOR\b/, // FOR <var> <- <start> TO <finish> [STEP <step>]
+];
 
 function lineStart(text, pos) {
   return text.lastIndexOf("\n", pos - 1) + 1;
