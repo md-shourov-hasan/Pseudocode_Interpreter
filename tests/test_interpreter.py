@@ -164,6 +164,8 @@ def test_calling_an_unknown_function_is_a_clear_not_yet_error():
         run_src("DECLARE X : REAL\nX <- MYSTERYFUNC(3.14159, 2)")
 
 
-def test_indexing_an_array_is_a_clear_not_yet_error():
-    with pytest.raises(PseudocodeError, match="later milestone"):
+def test_indexing_an_undeclared_name_is_a_clear_error():
+    # Real array indexing is exercised in test_arrays.py (Milestone 7);
+    # this just checks the "never declared" path still fires for indexing.
+    with pytest.raises(PseudocodeError, match="never declared"):
         run_src("DECLARE X : INTEGER\nX <- Numbers[1]")

@@ -8,7 +8,10 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
                  | if_stmt | case_stmt | for_stmt | repeat_stmt | while_stmt
                  | assignment_stmt
 
-    declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON data_type
+    declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON
+                       ( data_type | array_type )
+    array_type     := ARRAY '[' bound_pair (',' bound_pair)? ']' OF data_type  -- FR-8.1, FR-8.3
+    bound_pair     := expression ':' expression
     constant_stmt  := CONSTANT IDENTIFIER ASSIGN expression
     input_stmt     := INPUT IDENTIFIER
     output_stmt    := OUTPUT expression ( ',' expression )*
@@ -20,7 +23,7 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
                        ( STEP expression )? block NEXT IDENTIFIER           -- FR-6.1, FR-6.2, FR-6.3
     repeat_stmt    := REPEAT block UNTIL expression                         -- FR-6.4
     while_stmt     := WHILE expression DO block ENDWHILE                    -- FR-6.5
-    assignment_stmt:= IDENTIFIER ASSIGN expression
+    assignment_stmt:= ( IDENTIFIER | IDENTIFIER '[' arglist ']' ) ASSIGN expression  -- FR-8.2, FR-8.4
     data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
 
     expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
@@ -38,10 +41,10 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
                  | '(' expression ')'
     arglist     := expression ( ',' expression )*
 
-Array declarations (DECLARE x : ARRAY[...] OF ...) and indexed
-assignment targets (x[i] <- v) are deferred to Milestone 7; a DECLARE
-or assignment using them currently raises a clear "not supported yet"
-PseudocodeError rather than silently mis-parsing.
+Arrays are limited to 1 or 2 dimensions (FR-8.1, FR-8.3); a bound can
+be any expression (e.g. a CONSTANT), evaluated when the DECLARE runs.
+Procedures/functions (Milestone 8) and file handling (Milestone 9)
+remain unimplemented.
 """
 
 from .tokens import Token, TokenType
@@ -168,10 +171,7 @@ class Parser:
         self._expect(TokenType.COLON, "Expected ':' after the identifier(s) in a DECLARE statement")
 
         if self._check(TokenType.ARRAY):
-            raise PseudocodeError(
-                line,
-                "Array declarations (ARRAY[...] OF ...) aren't supported yet — coming in a later milestone.",
-            )
+            return self._array_declare_tail(names, line)
 
         type_tok = self._peek()
         if type_tok.type not in _DATA_TYPE_TOKENS:
@@ -182,6 +182,36 @@ class Parser:
             )
         self._advance()
         return ast.Declare(names, _DATA_TYPE_TOKENS[type_tok.type], line)
+
+    def _array_declare_tail(self, names, line):
+        """The ARRAY[...] OF <type> part of a DECLARE, after the
+        identifier list and ':' have already been consumed.
+        (FR-8.1, FR-8.3)"""
+        self._advance()  # consume ARRAY
+        self._expect(TokenType.LBRACKET, "Expected '[' after ARRAY")
+        dimensions = [self._array_bound_pair()]
+        while self._match(TokenType.COMMA):
+            dimensions.append(self._array_bound_pair())
+        if len(dimensions) > 2:
+            raise PseudocodeError(line, "Arrays can have at most 2 dimensions (1D or 2D).")
+        self._expect(TokenType.RBRACKET, "Expected ']' to close the array's bounds")
+        self._expect(TokenType.OF, "Expected OF after the array's bounds")
+
+        type_tok = self._peek()
+        if type_tok.type not in _DATA_TYPE_TOKENS:
+            raise PseudocodeError(
+                type_tok.line,
+                f"Expected a data type (INTEGER, REAL, CHAR, STRING, or BOOLEAN), "
+                f"but found '{type_tok.lexeme or type_tok.type.name}'.",
+            )
+        self._advance()
+        return ast.ArrayDeclare(names, dimensions, _DATA_TYPE_TOKENS[type_tok.type], line)
+
+    def _array_bound_pair(self):
+        lower = self._expression()
+        self._expect(TokenType.COLON, "Expected ':' between an array's lower and upper bound")
+        upper = self._expression()
+        return (lower, upper)
 
     def _constant_statement(self):
         line = self._advance().line  # consume CONSTANT
@@ -324,14 +354,11 @@ class Parser:
     def _assignment_statement(self):
         name_tok = self._advance()  # consume IDENTIFIER
         if self._check(TokenType.LBRACKET):
-            raise PseudocodeError(
-                name_tok.line,
-                "Assigning to an array element (e.g. Grade[16, 3] <- 'A') isn't supported yet — "
-                "coming in a later milestone.",
-            )
+            target = self._finish_index(name_tok)  # <identifier>[<index>...] <- <value>, FR-8.2/FR-8.4
+        else:
+            target = ast.Identifier(name_tok.lexeme, name_tok.line)
         self._expect(TokenType.ASSIGN, "Expected '<-' to assign a value")
         value = self._expression()
-        target = ast.Identifier(name_tok.lexeme, name_tok.line)
         return ast.Assignment(target, value, name_tok.line)
 
     # ---- expressions (precedence climbing) -----------------------------

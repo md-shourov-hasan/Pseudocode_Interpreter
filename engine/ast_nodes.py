@@ -5,10 +5,11 @@ Kept as plain dataclasses with no behaviour — the interpreter (Milestone
 3+) is what gives these meaning. Every node carries `line` so runtime
 errors can be reported against the original source line (NFR-10).
 
-Node coverage: Program, Declare, Constant, Input, Output, If, Case,
-Assignment, ForLoop, RepeatLoop, WhileLoop (statements — added across
-Milestones 2, 5, 6), and Literal, Identifier, UnaryOp, BinaryOp, Call,
-Index (expressions — added in Milestone 2).
+Node coverage: Program, Declare, ArrayDeclare, Constant, Input, Output,
+If, Case, Assignment, ForLoop, RepeatLoop, WhileLoop (statements —
+added across Milestones 2, 5, 6, 7), and Literal, Identifier, UnaryOp,
+BinaryOp, Call, Index (expressions — added in Milestone 2; Index is
+also used as an Assignment target as of Milestone 7).
 
 Call and Index are parsed now (they're pure syntax: `name(...)` /
 `name[...]`) but not yet given meaning — built-in functions arrive in
@@ -32,9 +33,27 @@ class Program:
 class Declare:
     """DECLARE <identifier list> : <data type>   (FR-3.1, extended to
     allow multiple comma-separated identifiers sharing one data type,
-    e.g. DECLARE a, b, c : INTEGER)."""
+    e.g. DECLARE a, b, c : INTEGER). Array declarations use ArrayDeclare
+    instead — see below."""
     identifiers: list
     data_type: str   # "INTEGER" | "REAL" | "CHAR" | "STRING" | "BOOLEAN"
+    line: int
+
+
+@dataclass
+class ArrayDeclare:
+    """DECLARE <identifier list> : ARRAY[<l>:<u>] OF <data type>   (FR-8.1)
+    or the 2D form ARRAY[<lr>:<ur>, <lc>:<uc>] OF <data type>   (FR-8.3).
+
+    `dimensions` is a list of (lower_expr, upper_expr) pairs — one pair
+    for a 1D array, two for a 2D array — evaluated when the DECLARE
+    runs (so a bound can be a CONSTANT, not just a literal). Like
+    Declare, `identifiers` may name several arrays that all share the
+    same shape and element type.
+    """
+    identifiers: list
+    dimensions: list
+    element_type: str
     line: int
 
 
@@ -85,11 +104,11 @@ class Case:
 
 @dataclass
 class Assignment:
-    """<identifier> <- <value>   (FR-3.3)
+    """<identifier> <- <value>   (FR-3.3), or <identifier>[<index>...] <- <value>
+    for an array element (FR-8.2, FR-8.4).
 
-    `target` is an Identifier node for a plain variable in this
-    milestone. Milestone 7 extends this to Index targets for array
-    element assignment (e.g. Grade[16, 3] <- 'A').
+    `target` is an Identifier node for a plain variable, or an Index
+    node for an array element.
     """
     target: object
     value: object

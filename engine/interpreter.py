@@ -33,6 +33,10 @@ Implements:
     FR-6.3        Optional STEP <increment>, ascending or descending
     FR-6.4        REPEAT ... UNTIL <condition> — runs at least once
     FR-6.5        WHILE <condition> DO ... ENDWHILE — may run zero times
+    FR-8.1        1D array DECLARE: ARRAY[<l>:<u>] OF <type>
+    FR-8.2        1D array element assignment: <id>[<index>] <- <value>
+    FR-8.3        2D array DECLARE: ARRAY[<lr>:<ur>, <lc>:<uc>] OF <type>
+    FR-8.4        2D array element assignment: <id>[<row>, <col>] <- <value>
     (ext)         AND / OR / NOT boolean connectives in conditions,
                   requested beyond the reference syntax guide
 
@@ -44,8 +48,14 @@ Two deliberate deviations from strict type-mismatch behaviour
   - OUTPUT of a REAL value is rounded to at most 5 decimal places,
     with insignificant trailing zeros trimmed.
 
-Not yet implemented (later milestones): arrays (M7),
-procedures/functions (M8), file handling (M9).
+Not yet implemented (later milestones): procedures/functions (M8),
+file handling (M9).
+
+Array storage note: each array's elements live in a plain dict keyed
+by index tuple (e.g. (3,) for 1D, (2, 5) for 2D), eagerly filled with
+the element type's default value at DECLARE time. That trades a little
+memory for simplicity — fine at the scale of a student program, but
+not something you'd want for, say, a 1,000,000-element array.
 
 NFR-3 note: loops make genuine infinite loops possible for the first
 time (e.g. a WHILE whose condition never becomes FALSE). This
@@ -89,12 +99,16 @@ _PYTHON_TYPES_FOR = {
 
 
 class Symbol:
-    __slots__ = ("data_type", "value", "is_constant")
+    __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions")
 
-    def __init__(self, data_type: str, value, is_constant: bool):
+    def __init__(self, data_type: str, value, is_constant: bool, is_array: bool = False, dimensions=None):
         self.data_type = data_type
         self.value = value
         self.is_constant = is_constant
+        self.is_array = is_array
+        # dimensions: list of (lower, upper) INTEGER pairs — one pair per
+        # dimension — only meaningful when is_array is True.
+        self.dimensions = dimensions
 
 
 class Interpreter:
@@ -143,6 +157,55 @@ class Interpreter:
                 stmt.data_type, _DEFAULT_VALUE[stmt.data_type], is_constant=False
             )
 
+    def _exec_array_declare(self, stmt: ast.ArrayDeclare):
+        # Evaluate bounds once (they're shared across every identifier in
+        # this DECLARE) and validate them before touching the symbol table,
+        # so a bad bound never leaves a partially-declared array behind.
+        dimensions = []
+        for lower_node, upper_node in stmt.dimensions:
+            lower = self._eval(lower_node)
+            upper = self._eval(upper_node)
+            self._expect_integer("An array bound", lower, stmt.line, "lower bound")
+            self._expect_integer("An array bound", upper, stmt.line, "upper bound")
+            if lower > upper:
+                raise PseudocodeError(
+                    stmt.line,
+                    f"An array's lower bound ({lower}) cannot be greater than its upper bound ({upper}).",
+                )
+            dimensions.append((lower, upper))
+
+        seen_in_statement = set()
+        for name in stmt.identifiers:
+            if name in self.symbols or name in seen_in_statement:
+                raise PseudocodeError(stmt.line, f"'{name}' has already been declared.")
+            seen_in_statement.add(name)
+
+        default = _DEFAULT_VALUE[stmt.element_type]
+        for name in stmt.identifiers:
+            if len(dimensions) == 1:
+                (lo, hi) = dimensions[0]
+                values = {(i,): default for i in range(lo, hi + 1)}
+            else:
+                (r_lo, r_hi), (c_lo, c_hi) = dimensions
+                values = {
+                    (r, c): default
+                    for r in range(r_lo, r_hi + 1)
+                    for c in range(c_lo, c_hi + 1)
+                }
+            self.symbols[name] = Symbol(
+                stmt.element_type, values, is_constant=False, is_array=True, dimensions=dimensions
+            )
+
+    def _ensure_scalar(self, symbol, name, line):
+        """Guard against using a whole array where a single value is
+        expected (bare `Arr` instead of `Arr[i]`) — without this, the
+        array's internal storage dict would leak straight into OUTPUT,
+        arithmetic, etc. as an unhelpful Python repr."""
+        if symbol.is_array:
+            raise PseudocodeError(
+                line, f"'{name}' is an array — use an index, e.g. {name}[1], to access an element."
+            )
+
     def _exec_constant(self, stmt: ast.Constant):
         if stmt.identifier in self.symbols:
             raise PseudocodeError(
@@ -154,6 +217,9 @@ class Interpreter:
         self.symbols[stmt.identifier] = Symbol(data_type, value, is_constant=True)
 
     def _exec_assignment(self, stmt: ast.Assignment):
+        if isinstance(stmt.target, ast.Index):
+            self._exec_array_assignment(stmt)
+            return
         name = stmt.target.name
         symbol = self.symbols.get(name)
         if symbol is None:
@@ -161,6 +227,7 @@ class Interpreter:
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
             )
+        self._ensure_scalar(symbol, name, stmt.line)
         if symbol.is_constant:
             raise PseudocodeError(
                 stmt.line,
@@ -169,21 +236,63 @@ class Interpreter:
         value = self._eval(stmt.value)
         self._store(symbol, value, stmt.line, name)
 
+    def _exec_array_assignment(self, stmt: ast.Assignment):
+        """<identifier>[<index>...] <- <value>   (FR-8.2, FR-8.4)"""
+        target = stmt.target
+        symbol, index_tuple = self._resolve_array_element(target.name, target.indices, stmt.line)
+        value = self._eval(stmt.value)
+        value = self._coerce_for_type(symbol.data_type, value, stmt.line, target.name)
+        symbol.value[index_tuple] = value
+
+    def _resolve_array_element(self, name, index_nodes, line):
+        """Shared by array reads (_eval_index) and array-element writes
+        (_exec_array_assignment): looks up the array, evaluates and
+        bounds-checks each index, and returns (symbol, index_tuple)."""
+        symbol = self.symbols.get(name)
+        if symbol is None:
+            raise PseudocodeError(line, f"'{name}' is used here but was never declared with DECLARE.")
+        if not symbol.is_array:
+            raise PseudocodeError(line, f"'{name}' is not an array, so it can't be indexed.")
+
+        if len(index_nodes) != len(symbol.dimensions):
+            want = len(symbol.dimensions)
+            got = len(index_nodes)
+            raise PseudocodeError(
+                line,
+                f"'{name}' is a {want}D array and needs {want} index/indices, but got {got}.",
+            )
+
+        indices = []
+        for index_node, (lower, upper) in zip(index_nodes, symbol.dimensions):
+            index_value = self._eval(index_node)
+            self._expect_integer(f"'{name}'", index_value, line, "index")
+            if index_value < lower or index_value > upper:
+                raise PseudocodeError(
+                    line,
+                    f"Index {index_value} is out of bounds for '{name}' "
+                    f"(valid range is {lower} to {upper}).",
+                )
+            indices.append(index_value)
+        return symbol, tuple(indices)
+
     def _store(self, symbol, value, line, name):
         """Shared type-checked store used by plain assignment and by the
         FOR loop's per-iteration update of its loop variable."""
+        symbol.value = self._coerce_for_type(symbol.data_type, value, line, name)
+
+    def _coerce_for_type(self, data_type, value, line, name):
         # A REAL result (e.g. from "/") assigned into an INTEGER variable is
         # narrowed by truncating toward zero, rather than treated as a type
         # error — this is a deliberate product decision (requested), since
         # ordinary division always produces a float in the underlying
         # arithmetic even when the mathematical quotient looks INTEGER-like.
-        if symbol.data_type == "INTEGER" and isinstance(value, float) and not isinstance(value, bool):
+        if data_type == "INTEGER" and isinstance(value, float) and not isinstance(value, bool):
             value = int(value)
-        self._check_assignable(symbol.data_type, value, line, name)
+        self._check_assignable(data_type, value, line, name)
         # INTEGER assigned into a REAL variable is widened, per FR-2.2 semantics.
-        if symbol.data_type == "REAL" and isinstance(value, int) and not isinstance(value, bool):
+        if data_type == "REAL" and isinstance(value, int) and not isinstance(value, bool):
             value = float(value)
-        symbol.value = value
+        return value
 
     def _exec_input(self, stmt):
         name = stmt.identifier
@@ -193,6 +302,7 @@ class Interpreter:
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
             )
+        self._ensure_scalar(symbol, name, stmt.line)
         raw = self._input_fn()
         try:
             value = self._coerce_input(raw, symbol.data_type)
@@ -229,6 +339,7 @@ class Interpreter:
             raise PseudocodeError(
                 stmt.line, f"'{stmt.variable}' is a CONSTANT and cannot be used as a FOR loop variable."
             )
+        self._ensure_scalar(symbol, stmt.variable, stmt.line)
 
         # FR-6.2: start == finish runs the body exactly once; start "past"
         # finish for the step's direction runs it zero times. Ascending
@@ -322,6 +433,7 @@ class Interpreter:
                 node.line,
                 f"'{node.name}' is used here but was never declared with DECLARE.",
             )
+        self._ensure_scalar(symbol, node.name, node.line)
         return symbol.value
 
     def _eval_unary(self, node: ast.UnaryOp):
@@ -521,10 +633,10 @@ class Interpreter:
         return text[start - 1 : start - 1 + length]
 
     def _eval_index(self, node: ast.Index):
-        raise PseudocodeError(
-            node.line,
-            f"Array indexing on '{node.name}' isn't supported yet — arrays arrive in a later milestone.",
-        )
+        """<identifier>[<index>...]   (array element read; the write side
+        is _exec_array_assignment)."""
+        symbol, index_tuple = self._resolve_array_element(node.name, node.indices, node.line)
+        return symbol.value[index_tuple]
 
     # ---- type checking -----------------------------------------------
 
@@ -616,6 +728,7 @@ class Interpreter:
 
 Interpreter._STATEMENT_HANDLERS = {
     ast.Declare: Interpreter._exec_declare,
+    ast.ArrayDeclare: Interpreter._exec_array_declare,
     ast.Constant: Interpreter._exec_constant,
     ast.Assignment: Interpreter._exec_assignment,
     ast.Input: Interpreter._exec_input,

@@ -83,14 +83,23 @@ def test_blank_lines_between_statements_are_skipped():
     assert len(prog.statements) == 2
 
 
-def test_array_declare_not_yet_supported_gives_clear_error():
-    with pytest.raises(PseudocodeError, match="supported yet"):
-        parse_src("DECLARE Grade : ARRAY[1:30] OF CHAR")
+def test_array_declare_parses_as_array_declare_node():
+    # Was "not supported yet" through Milestone 6; arrays landed in Milestone 7.
+    prog = parse_src("DECLARE Grade : ARRAY[1:30] OF CHAR")
+    stmt = prog.statements[0]
+    assert isinstance(stmt, ast.ArrayDeclare)
+    assert stmt.identifiers == ["Grade"]
+    assert stmt.element_type == "CHAR"
+    assert len(stmt.dimensions) == 1
 
 
-def test_indexed_assignment_not_yet_supported_gives_clear_error():
-    with pytest.raises(PseudocodeError, match="supported yet"):
-        parse_src("Grade[16] <- 'A'")
+def test_indexed_assignment_parses_with_index_target():
+    # Was "not supported yet" through Milestone 6; arrays landed in Milestone 7.
+    prog = parse_src("Grade[16] <- 'A'")
+    stmt = prog.statements[0]
+    assert isinstance(stmt, ast.Assignment)
+    assert isinstance(stmt.target, ast.Index)
+    assert stmt.target.name == "Grade"
 
 
 def test_statement_must_end_at_newline():
