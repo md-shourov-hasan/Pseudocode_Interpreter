@@ -76,10 +76,39 @@ student-facing ``PseudocodeError`` when the limit is exceeded.
 import math
 import random
 import time
+from decimal import ROUND_HALF_UP, Context, Decimal
 
 from . import ast_nodes as ast
 from .errors import PseudocodeError, format_type_name, normalize_unexpected_error
 from .tokens import BUILTIN_FUNCTIONS
+
+# ROUND works on the number's decimal text, not its binary float, and rounds a
+# tie away from zero ("0.5 rounds up"), which is what students do by hand and
+# what exam mark schemes expect. Python's own round() breaks ties toward the
+# even digit (round(2.5) == 2) and sees 2.675 as 2.67499999..., so it disagrees
+# with both. A float has at most ~340 digits after the point in its shortest
+# form, so places beyond this bound can never change (or must always erase) it.
+_ROUND_DIGITS_LIMIT = 350
+_ROUND_PRECISION = 800  # comfortably above 309 integer digits + 340 fractional digits
+
+
+def _round_half_up(value, places):
+    """ROUND(value, places) with ties rounded away from zero. INTEGER in,
+    INTEGER out; REAL in, REAL out. Raises ArithmeticError if the result cannot
+    be represented (the caller turns that into a student-facing message)."""
+    is_int = isinstance(value, int)
+    if places > _ROUND_DIGITS_LIMIT:
+        return value
+    if places < -_ROUND_DIGITS_LIMIT:
+        return 0 if is_int else 0.0
+    exact = Decimal(value) if is_int else Decimal(repr(value))
+    step = Decimal((0, (1,), -places))  # 10 ** -places, e.g. 0.01 for 2 places
+    # A fresh context per call: quantize() records signals on the context it uses.
+    context = Context(prec=_ROUND_PRECISION, rounding=ROUND_HALF_UP)
+    rounded = exact.quantize(step, rounding=ROUND_HALF_UP, context=context)
+    if is_int:
+        return int(rounded)
+    return float(rounded) + 0.0  # "+ 0.0" turns a negative zero into 0.0
 
 # Default value each data type gets when DECLAREd, before assignment.
 _DEFAULT_VALUE = {
@@ -200,8 +229,8 @@ class Interpreter:
         for lower_node, upper_node in stmt.dimensions:
             lower = self._eval(lower_node)
             upper = self._eval(upper_node)
-            self._expect_integer("An array bound", lower, stmt.line, "lower bound")
-            self._expect_integer("An array bound", upper, stmt.line, "upper bound")
+            lower = self._expect_integer("An array bound", lower, stmt.line, "lower bound")
+            upper = self._expect_integer("An array bound", upper, stmt.line, "upper bound")
             if lower > upper:
                 raise PseudocodeError(
                     stmt.line,
@@ -300,7 +329,7 @@ class Interpreter:
         indices = []
         for index_node, (lower, upper) in zip(index_nodes, symbol.dimensions):
             index_value = self._eval(index_node)
-            self._expect_integer(f"'{name}'", index_value, line, "index")
+            index_value = self._expect_integer(f"'{name}'", index_value, line, "index")
             if index_value < lower or index_value > upper:
                 raise PseudocodeError(
                     line,
@@ -410,9 +439,9 @@ class Interpreter:
         start = self._eval(stmt.start)
         finish = self._eval(stmt.finish)
         step = self._eval(stmt.step) if stmt.step is not None else 1
-        self._expect_integer("FOR", start, stmt.line, "start value")
-        self._expect_integer("FOR", finish, stmt.line, "finish value")
-        self._expect_integer("FOR", step, stmt.line, "STEP value")
+        start = self._expect_integer("FOR", start, stmt.line, "start value")
+        finish = self._expect_integer("FOR", finish, stmt.line, "finish value")
+        step = self._expect_integer("FOR", step, stmt.line, "STEP value")
         if step == 0:
             raise PseudocodeError(
                 stmt.line, "A FOR loop's STEP value cannot be 0 (it would never finish)."
@@ -664,10 +693,31 @@ class Interpreter:
             )
 
     def _expect_integer(self, name, value, line, which="argument"):
-        if isinstance(value, bool) or not isinstance(value, int):
+        """Return `value` as an int, or raise.
+
+        A REAL that is a whole number (5.0, as produced by 10 / 2 or
+        ROUND(2.4, 0)) is accepted, because "/" always yields a REAL even when
+        the quotient is whole -- the same reasoning as narrowing a REAL into an
+        INTEGER variable. A REAL with a fractional part (2.5) is still an
+        error, since silently truncating it here would hide a real mistake."""
+        if isinstance(value, bool):
             raise PseudocodeError(
                 line, f"{name}'s {which} must be INTEGER, but got {self._type_name(value)}."
             )
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            hint = "" if name == "ROUND" else " (DIV gives a whole-number quotient.)"
+            raise PseudocodeError(
+                line,
+                f"{name}'s {which} must be INTEGER, but got the REAL value "
+                f"{self._format_real(value)}, which is not a whole number.{hint}",
+            )
+        raise PseudocodeError(
+            line, f"{name}'s {which} must be INTEGER, but got {self._type_name(value)}."
+        )
 
     def _expect_string(self, name, value, line, which="argument"):
         if not isinstance(value, str):
@@ -679,10 +729,10 @@ class Interpreter:
         self._expect_arg_count("ROUND", args, 2, line)
         value, places = args
         self._expect_numeric("ROUND", value, line, "first argument")
-        self._expect_integer("ROUND", places, line, "second argument (places)")
+        places = self._expect_integer("ROUND", places, line, "second argument (places)")
         try:
-            result = round(value, places)
-        except (OverflowError, ValueError):
+            result = _round_half_up(value, places)
+        except (ArithmeticError, ValueError):
             raise PseudocodeError(
                 line,
                 "ROUND could not represent the requested result within the supported range.",
@@ -708,8 +758,8 @@ class Interpreter:
         a float, unlike Python's own floor-based // and %."""
         self._expect_arg_count(name, args, 2, line)
         dividend, divisor = args
-        self._expect_integer(name, dividend, line, "first argument (dividend)")
-        self._expect_integer(name, divisor, line, "second argument (divisor)")
+        dividend = self._expect_integer(name, dividend, line, "first argument (dividend)")
+        divisor = self._expect_integer(name, divisor, line, "second argument (divisor)")
         if divisor == 0:
             raise PseudocodeError(line, f"{name}: division by zero.")
         quotient = abs(dividend) // abs(divisor)
@@ -748,8 +798,8 @@ class Interpreter:
         self._expect_arg_count("SUBSTRING", args, 3, line)
         text, start, length = args
         self._expect_string("SUBSTRING", text, line, "first argument")
-        self._expect_integer("SUBSTRING", start, line, "second argument (start)")
-        self._expect_integer("SUBSTRING", length, line, "third argument (length)")
+        start = self._expect_integer("SUBSTRING", start, line, "second argument (start)")
+        length = self._expect_integer("SUBSTRING", length, line, "third argument (length)")
         if start < 1 or length < 1:
             raise PseudocodeError(
                 line, "SUBSTRING's start and length must both be positive integers."

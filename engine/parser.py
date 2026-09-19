@@ -76,11 +76,42 @@ _LITERAL_TYPE_OF = {
     TokenType.BOOLEAN_LITERAL: "BOOLEAN",
 }
 
+# Each closing keyword, mapped to the kind of block it belongs to. When a block
+# reaches the closing keyword of a DIFFERENT, enclosing block, the block it is
+# in must itself be missing its own terminator (FR-11.1) -- it is not a stray
+# keyword. See Parser._at_outer_closer.
+_STATEMENT_KEYWORDS = frozenset(
+    {
+        TokenType.DECLARE,
+        TokenType.CONSTANT,
+        TokenType.INPUT,
+        TokenType.OUTPUT,
+        TokenType.IF,
+        TokenType.CASE,
+        TokenType.FOR,
+        TokenType.REPEAT,
+        TokenType.WHILE,
+    }
+)
+
+_CLOSER_BELONGS_TO = {
+    TokenType.ELSE: TokenType.IF,
+    TokenType.ENDIF: TokenType.IF,
+    TokenType.NEXT: TokenType.FOR,
+    TokenType.UNTIL: TokenType.REPEAT,
+    TokenType.ENDWHILE: TokenType.WHILE,
+    TokenType.OTHERWISE: TokenType.CASE,
+    TokenType.ENDCASE: TokenType.CASE,
+}
+
 
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.pos = 0
+        # Kinds of block (IF / FOR / WHILE / REPEAT / CASE) whose body is being
+        # parsed right now, outermost first.
+        self._open_blocks: list[TokenType] = []
 
     # ---- token helpers -----------------------------------------------
 
@@ -120,15 +151,55 @@ class Parser:
             pass
 
     def _block(self, stop_types: frozenset) -> list:
-        """Parse statements until EOF or a token in `stop_types` is seen
-        (the stop token itself is left unconsumed)."""
+        """Parse statements until EOF, a token in `stop_types`, or the closing
+        keyword of an enclosing block is seen (the stop token itself is left
+        unconsumed, so the caller can report which terminator is missing)."""
         statements = []
         self._skip_newlines()
-        while not self._check(TokenType.EOF) and self._peek().type not in stop_types:
+        while (
+            not self._check(TokenType.EOF)
+            and self._peek().type not in stop_types
+            and not self._at_outer_closer()
+        ):
             statements.append(self._statement())
             self._end_of_statement()
             self._skip_newlines()
         return statements
+
+    def _at_outer_closer(self) -> bool:
+        """True when the next token closes a block that is currently open
+        (e.g. NEXT while a FOR is open).
+
+        Reached from inside a *nested* block, that means the nested block ran
+        into its parent's terminator without ever being closed itself. Stopping
+        here lets that nested statement report "this IF is missing its ENDIF"
+        instead of blaming the parent's terminator ("NEXT has no matching FOR").
+        A closer with no matching open block is a genuinely stray keyword and
+        still falls through to _statement()'s "does not have a matching ..."."""
+        opener = _CLOSER_BELONGS_TO.get(self._peek().type)
+        return opener is not None and opener in self._open_blocks
+
+    def _case_body_has_ended(self) -> bool:
+        """True when the next token starts an ordinary statement rather than a
+        CASE branch ("<literal> : ..."), i.e. the CASE is missing its ENDCASE.
+        A bad branch value such as "Total : ..." is left for _case_value() to
+        report as before."""
+        tok = self._peek()
+        if tok.type in _STATEMENT_KEYWORDS:
+            return True
+        return tok.type == TokenType.IDENTIFIER and self._peek(1).type != TokenType.COLON
+
+    def _missing_end(self, line: int, construct: str, terminator: str) -> PseudocodeError:
+        """FR-11.1: a missing terminator, reported at the line of the opening
+        keyword, plus where the parser noticed the problem (if not at the end)."""
+        message = f"This {construct} statement is missing its matching {terminator}."
+        found = self._peek()
+        if found.type != TokenType.EOF:
+            message += (
+                f" The program reached {describe_token(found)} on line {found.line}"
+                " before this was closed."
+            )
+        return PseudocodeError(line, message)
 
     def _end_of_statement(self):
         """A statement must be followed by a newline or EOF."""
@@ -277,9 +348,11 @@ class Parser:
             self._advance()
             step = self._expression()
 
+        self._open_blocks.append(TokenType.FOR)
         body = self._block(frozenset({TokenType.NEXT}))
         if not self._check(TokenType.NEXT):
-            raise PseudocodeError(line, "This FOR statement is missing its matching NEXT.")
+            raise self._missing_end(line, "FOR", "NEXT")
+        self._open_blocks.pop()
         self._advance()  # consume NEXT
         next_name_tok = self._expect(TokenType.IDENTIFIER, "Expected the loop variable's name after NEXT")
         if next_name_tok.lexeme != var_tok.lexeme:
@@ -293,9 +366,11 @@ class Parser:
     def _repeat_statement(self):
         """REPEAT ... UNTIL <condition>   (FR-6.4)"""
         line = self._advance().line  # consume REPEAT
+        self._open_blocks.append(TokenType.REPEAT)
         body = self._block(frozenset({TokenType.UNTIL}))
         if not self._check(TokenType.UNTIL):
-            raise PseudocodeError(line, "This REPEAT statement is missing its matching UNTIL.")
+            raise self._missing_end(line, "REPEAT", "UNTIL")
+        self._open_blocks.pop()
         self._advance()  # consume UNTIL
         condition = self._expression()
         return ast.RepeatLoop(body, condition, line)
@@ -306,9 +381,11 @@ class Parser:
         condition = self._expression()
         self._skip_newlines()  # DO is conventionally same-line, but allow either
         self._expect(TokenType.DO, "Expected DO after the WHILE condition")
+        self._open_blocks.append(TokenType.WHILE)
         body = self._block(frozenset({TokenType.ENDWHILE}))
         if not self._check(TokenType.ENDWHILE):
-            raise PseudocodeError(line, "This WHILE statement is missing its matching ENDWHILE.")
+            raise self._missing_end(line, "WHILE", "ENDWHILE")
+        self._open_blocks.pop()
         self._advance()  # consume ENDWHILE
         return ast.WhileLoop(condition, body, line)
 
@@ -318,17 +395,32 @@ class Parser:
         condition = self._expression()
         self._skip_newlines()  # THEN is conventionally on its own line, but same-line is fine too
         self._expect(TokenType.THEN, "Expected THEN after the IF condition")
+        self._open_blocks.append(TokenType.IF)
         then_body = self._block(frozenset({TokenType.ELSE, TokenType.ENDIF}))
 
         else_body = []
         if self._check(TokenType.ELSE):
             self._advance()
             else_body = self._block(frozenset({TokenType.ENDIF}))
+            if self._check(TokenType.ELSE):
+                found_line = self._peek().line
+                if self._open_blocks.count(TokenType.IF) > 1:
+                    # Nested IF: this ELSE most likely belongs to the enclosing
+                    # IF, which means this IF is missing its ENDIF.
+                    raise PseudocodeError(
+                        line,
+                        "This IF statement is missing its matching ENDIF, or has more than "
+                        f"one ELSE. The program reached 'ELSE' on line {found_line} "
+                        "before this was closed.",
+                    )
+                raise PseudocodeError(
+                    found_line,
+                    "This IF statement already has an ELSE; it can only have one.",
+                )
 
         if not self._check(TokenType.ENDIF):
-            raise PseudocodeError(
-                line, "This IF statement is missing its matching ENDIF."
-            )
+            raise self._missing_end(line, "IF", "ENDIF")
+        self._open_blocks.pop()
         self._advance()  # consume ENDIF
         return ast.If(condition, then_body, else_body, line)
 
@@ -340,11 +432,15 @@ class Parser:
 
         branches = []
         otherwise_stmt = None
+        self._open_blocks.append(TokenType.CASE)
         self._skip_newlines()
-        while not self._check(TokenType.EOF) and self._peek().type not in (
-            TokenType.OTHERWISE,
-            TokenType.ENDCASE,
+        while (
+            not self._check(TokenType.EOF)
+            and self._peek().type not in (TokenType.OTHERWISE, TokenType.ENDCASE)
+            and not self._at_outer_closer()
         ):
+            if self._case_body_has_ended():
+                raise self._missing_end(line, "CASE OF", "ENDCASE")
             value_node = self._case_value()
             self._expect(TokenType.COLON, "Expected ':' after the CASE value")
             branch_stmt = self._statement()
@@ -359,9 +455,8 @@ class Parser:
             self._skip_newlines()
 
         if not self._check(TokenType.ENDCASE):
-            raise PseudocodeError(
-                line, "This CASE OF statement is missing its matching ENDCASE."
-            )
+            raise self._missing_end(line, "CASE OF", "ENDCASE")
+        self._open_blocks.pop()
         self._advance()  # consume ENDCASE
         return ast.Case(subject_tok.lexeme, branches, otherwise_stmt, line)
 
