@@ -19,10 +19,10 @@
 
   <div class="status" id="status">
     <span class="status-dot" id="status-dot"></span>
-    <span id="status-label">Idle</span>
+    <span id="status-label">Loading editor…</span>
   </div>
 
-  <button id="run-btn" class="run-btn">
+  <button id="run-btn" class="run-btn" disabled>
     <span class="run-icon">&#9654;</span> Run
   </button>
 </header>
@@ -32,10 +32,7 @@
   <section class="pane editor-pane">
     <div class="pane-header">Source</div>
     <div class="editor-wrap">
-      <div class="gutter" id="gutter">1</div>
-      <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off"
-        autocomplete="off" autocorrect="off"
-        data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"></textarea>
+      <div id="editor" class="monaco-host" aria-label="Pseudocode source editor"></div>
     </div>
   </section>
 
@@ -51,6 +48,14 @@
 
 </main>
 
+<!--
+  Monaco is pinned to a known release. The current project has no frontend
+  bundler, so the browser AMD loader is the smallest integration step. The
+  language definition is kept in a separate adapter so the eventual VS Code
+  extension can reuse the same language rules without depending on Flask.
+-->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs/loader.js"></script>
+<script src="{{ url_for('static', filename='pseudocode-monaco.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

@@ -1,5 +1,4 @@
-const editor = document.getElementById("editor");
-const gutter = document.getElementById("gutter");
+const editorHost = document.getElementById("editor");
 const runBtn = document.getElementById("run-btn");
 const statusDot = document.getElementById("status-dot");
 const statusLabel = document.getElementById("status-label");
@@ -28,168 +27,92 @@ ENDIF
 OUTPUT "Score: ", Score
 `;
 
+let editor = null;
 let currentRunId = null;
 let pollTimer = null;
 
-// ---- editor gutter --------------------------------------------------
+// ---- status ------------------------------------------------------
 
-function syncGutter() {
-  const lineCount = editor.value.split("\n").length;
-  const lines = [];
-  for (let i = 1; i <= lineCount; i++) lines.push(i);
-  gutter.textContent = lines.join("\n");
+function setStatus(state, label) {
+  statusDot.className = "status-dot" + (state ? " " + state : "");
+  statusLabel.textContent = label;
 }
 
-// ---- smart-punctuation sanitizer ------------------------------------
-//
-// Some browsers/OSes (Safari's "Smart Dashes"/"Smart Quotes", mobile
-// keyboard autocorrect, Grammarly-style extensions) silently rewrite
-// plain ASCII as you type — e.g. turning "-" into an en/em dash, or
-// straight quotes into curly ones. That breaks pseudocode syntax like
-// the "<-" assignment arrow or string literals. This normalizes those
-// characters back to plain ASCII on every keystroke, keeping the
-// cursor position stable (every substitution below is one-character-
-// for-one-character, so offsets never shift).
-const SMART_PUNCTUATION = {
-  "\u2013": "-", // en dash
-  "\u2014": "-", // em dash
-  "\u2018": "'", "\u2019": "'", // curly single quotes
-  "\u201C": '"', "\u201D": '"', // curly double quotes
-};
-const SMART_PUNCTUATION_RE = /[\u2013\u2014\u2018\u2019\u201C\u201D]/g;
+// ---- Monaco editor ------------------------------------------------
 
-function sanitizeSmartPunctuation() {
-  const original = editor.value;
-  if (!SMART_PUNCTUATION_RE.test(original)) return;
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  editor.value = original.replace(SMART_PUNCTUATION_RE, (ch) => SMART_PUNCTUATION[ch]);
-  editor.selectionStart = start;
-  editor.selectionEnd = end;
-}
-
-editor.addEventListener("input", () => {
-  sanitizeSmartPunctuation();
-  syncGutter();
-});
-editor.addEventListener("scroll", () => {
-  gutter.scrollTop = editor.scrollTop;
-});
-
-// ---- Tab / Enter smart indentation ------------------------------------
-//
-// Indentation unit is 4 spaces. Tab/Shift+Tab indent or outdent the
-// current line (or every line touched by a selection). Enter carries
-// the current line's indentation forward, and adds one extra level
-// when the line being finished opens a block: IF ... THEN, ELSE,
-// WHILE ... DO, REPEAT (on its own), or a FOR header line — more
-// block-opening keywords will extend this same rule as those
-// constructs are added.
-const INDENT = "    ";
-const INDENT_TRIGGERS = [
-  /\bTHEN\s*$/, // IF <condition> THEN
-  /\bELSE\s*$/, // ELSE
-  /\bDO\s*$/, // WHILE <condition> DO
-  /^REPEAT$/, // REPEAT (the whole line, body follows)
-  /^FOR\b/, // FOR <var> <- <start> TO <finish> [STEP <step>]
-];
-
-function lineStart(text, pos) {
-  return text.lastIndexOf("\n", pos - 1) + 1;
-}
-
-function lineEnd(text, pos) {
-  const i = text.indexOf("\n", pos);
-  return i === -1 ? text.length : i;
-}
-
-function insertText(text) {
-  // Prefer execCommand so the browser's native undo stack keeps working;
-  // fall back to direct value manipulation if it's unavailable.
-  if (document.execCommand && document.execCommand("insertText", false, text)) {
-    return;
-  }
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
-  editor.selectionStart = editor.selectionEnd = start + text.length;
-}
-
-function handleEnterKey() {
-  const value = editor.value;
-  const pos = editor.selectionStart;
-  const currentLineStart = lineStart(value, pos);
-  const currentLine = value.slice(currentLineStart, pos);
-  const indentMatch = currentLine.match(/^[ \t]*/);
-  let indent = indentMatch ? indentMatch[0] : "";
-
-  const trimmed = currentLine.trim();
-  if (INDENT_TRIGGERS.some((re) => re.test(trimmed))) {
-    indent += INDENT;
+function initializeEditor(monaco) {
+  const language = window.PseudocodeMonaco;
+  if (!language) {
+    throw new Error("Pseudocode Monaco language definition failed to load.");
   }
 
-  insertText("\n" + indent);
-}
-
-function handleTabKey(shiftKey) {
-  const value = editor.value;
-  const selStart = editor.selectionStart;
-  const selEnd = editor.selectionEnd;
-  const hasSelection = selStart !== selEnd;
-  const spansMultipleLines = hasSelection && value.slice(selStart, selEnd).includes("\n");
-
-  if (!hasSelection && !shiftKey) {
-    insertText(INDENT);
-    return;
-  }
-
-  if (!spansMultipleLines && !shiftKey) {
-    insertText(INDENT);
-    return;
-  }
-
-  // Indent/outdent every full line touched by the selection (or just the
-  // current line for a plain Shift+Tab with no selection).
-  const blockStart = lineStart(value, selStart);
-  const blockEnd = hasSelection ? lineEnd(value, selEnd) : lineEnd(value, selStart);
-  const block = value.slice(blockStart, blockEnd);
-  const lines = block.split("\n");
-
-  let firstLineDelta = 0;
-  let lastLineDelta = 0;
-
-  const newLines = lines.map((line, idx) => {
-    if (shiftKey) {
-      const removed = line.match(/^( {1,4}|\t)/);
-      if (!removed) return line;
-      if (idx === 0) firstLineDelta = -removed[0].length;
-      if (idx === lines.length - 1) lastLineDelta = -removed[0].length;
-      return line.slice(removed[0].length);
-    }
-    if (idx === 0) firstLineDelta = INDENT.length;
-    if (idx === lines.length - 1) lastLineDelta = INDENT.length;
-    return INDENT + line;
+  monaco.languages.register({
+    id: language.languageId,
+    extensions: language.extensions,
+    aliases: language.aliases,
   });
 
-  const newBlock = newLines.join("\n");
-  editor.value = value.slice(0, blockStart) + newBlock + value.slice(blockEnd);
-  editor.selectionStart = Math.max(blockStart, selStart + firstLineDelta);
-  editor.selectionEnd = Math.max(blockStart, selEnd + lastLineDelta);
-  syncGutter();
+  monaco.languages.setLanguageConfiguration(
+    language.languageId,
+    language.configuration,
+  );
+  monaco.languages.setMonarchTokensProvider(
+    language.languageId,
+    language.language,
+  );
+  monaco.editor.defineTheme(language.theme.name, language.theme);
+
+  editor = monaco.editor.create(editorHost, {
+    value: SAMPLE,
+    language: language.languageId,
+    theme: language.theme.name,
+    automaticLayout: true,
+    fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace',
+    fontSize: 14,
+    lineHeight: 22,
+    fontLigatures: false,
+    tabSize: 4,
+    insertSpaces: true,
+    detectIndentation: false,
+    autoIndent: "full",
+    scrollBeyondLastLine: false,
+    minimap: { enabled: false },
+    folding: true,
+    smoothScrolling: true,
+    padding: { top: 14, bottom: 14 },
+    renderWhitespace: "selection",
+    lineNumbersMinChars: 3,
+    roundedSelection: false,
+    contextmenu: true,
+    suggest: {
+      showWords: false,
+    },
+  });
+
+  runBtn.disabled = false;
+  setStatus("", "Idle");
+  editor.focus();
 }
 
-editor.addEventListener("keydown", (e) => {
-  if (e.key === "Tab") {
-    e.preventDefault();
-    handleTabKey(e.shiftKey);
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    handleEnterKey();
-  }
-});
+if (typeof window.require !== "function") {
+  setStatus("error", "Editor failed to load");
+} else {
+  window.require.config({
+    paths: {
+      vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs",
+    },
+  });
 
-editor.value = SAMPLE;
-syncGutter();
+  window.require(["vs/editor/editor.main"], (monaco) => {
+    try {
+      initializeEditor(monaco);
+    } catch (error) {
+      console.error(error);
+      appendError(null, "Couldn't initialize the pseudocode editor.");
+      setStatus("error", "Editor error");
+    }
+  });
+}
 
 // ---- console rendering --------------------------------------------------
 
@@ -219,16 +142,11 @@ function appendError(line, message) {
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-// ---- status ------------------------------------------------------
-
-function setStatus(state, label) {
-  statusDot.className = "status-dot" + (state ? " " + state : "");
-  statusLabel.textContent = label;
-}
-
 // ---- run lifecycle -----------------------------------------------------
 
 async function startRun() {
+  if (!editor) return;
+
   clearConsole();
   hideInputRow();
   runBtn.disabled = true;
@@ -239,7 +157,7 @@ async function startRun() {
     res = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: editor.value }),
+      body: JSON.stringify({ source: editor.getValue() }),
     });
   } catch (err) {
     appendError(null, "Couldn't reach the compiler server.");
@@ -286,7 +204,7 @@ async function poll() {
     finishRun("done", "Finished");
   } else if (data.state === "error" || data.state === "timeout") {
     stopPolling();
-    finishRun("error", "Error");
+    finishRun("error", data.state === "timeout" ? "Timed out" : "Error");
   }
 }
 
