@@ -76,7 +76,9 @@ Pseudocode_Interpreter/
 │   ├── test_iteration.py             FOR/NEXT, REPEAT/UNTIL, WHILE/DO/ENDWHILE
 │   ├── test_arrays.py                1D and 2D array declaration, indexing, bounds checking
 │   ├── test_array_io.py              INPUT into an array element, OUTPUT of a whole array
-│   └── test_lexer_typo_detection.py  Catches the "<--" typo instead of misparsing it
+│   ├── test_lexer_typo_detection.py  Catches the "<--" typo instead of misparsing it
+│   ├── test_error_handling.py         Milestone 10 cross-stage error contract and runtime edge cases
+│   └── test_web_error_handling.py     Web API validation/error boundary checks
 ├── Procfile                Deployment entry point (gunicorn)
 ├── requirements.txt
 └── README.md
@@ -126,7 +128,7 @@ directly.
 | 12 | Web interface | 🟡 Local test slice done (see note below) |
 | 8 | Procedures & functions | ⏳ Not started |
 | 9 | File handling (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) | ⏳ Not started |
-| 10 | Error handling pass (consistency audit across all features) | ⏳ Not started |
+| 10 | Error handling pass (consistency audit across all features) | ✅ Done |
 | 11 | Runtime safety (hard execution timeout / infinite-loop protection) | ⏳ Not started |
 
 Milestone 12 was pulled forward and scoped down early to make manual
@@ -156,6 +158,19 @@ comparing strictly against the syllabus:
 - **`<--` typo detection**: `X <-- 5` (an extra dash) raises a clear
   "looks like a typo" error instead of silently parsing as
   `X <- -5`, which was a real bug users hit.
+
+### Error-handling guarantees (Milestone 10)
+
+- Lexer, parser, interpreter, and the web execution boundary use a single
+  student-facing error contract based on `PseudocodeError`.
+- Parser messages do not expose internal token names such as `EOF` or
+  `NEWLINE`.
+- Runtime arithmetic edge cases such as division by zero, invalid powers,
+  and non-finite REAL values are converted into clear pseudocode errors.
+- Runtime fallback handling prevents unexpected Python exception details from
+  being shown to users.
+- Errors retain the source line that caused them whenever a source line is
+  available.
 
 ### Known limitations
 

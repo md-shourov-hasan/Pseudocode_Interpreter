@@ -75,10 +75,11 @@ INPUT is satisfied by an injectable `input_fn` so tests don't need a
 real stdin/stdout, and so Milestone 12 can wire it up to a web prompt.
 """
 
+import math
 import random
 
 from . import ast_nodes as ast
-from .errors import PseudocodeError
+from .errors import PseudocodeError, format_type_name, normalize_unexpected_error
 from .tokens import BUILTIN_FUNCTIONS
 
 # Default value each data type gets when DECLAREd, before assignment.
@@ -126,22 +127,31 @@ class Interpreter:
         self.output: list[str] = []
         self._input_fn = input_fn if input_fn is not None else input
         self._output_fn = output_fn if output_fn is not None else self.output.append
+        self._current_line = 0
 
     # ---- public API -----------------------------------------------------
 
     def run(self, program: ast.Program) -> list[str]:
-        for stmt in program.statements:
-            self._exec_statement(stmt)
-        return self.output
+        try:
+            for stmt in program.statements:
+                self._exec_statement(stmt)
+            return self.output
+        except PseudocodeError:
+            raise
+        except Exception as exc:
+            # Milestone 10 safety net: implementation-level exceptions must
+            # never leak through the public interpreter API.
+            raise normalize_unexpected_error(self._current_line, exc) from None
 
     # ---- statement execution --------------------------------------------
 
     def _exec_statement(self, stmt):
+        self._current_line = getattr(stmt, "line", 0)
         handler = self._STATEMENT_HANDLERS.get(type(stmt))
         if handler is None:
             raise PseudocodeError(
                 getattr(stmt, "line", 0),
-                f"This kind of statement isn't supported yet ({type(stmt).__name__}).",
+                "This statement is not supported yet.",
             )
         handler(self, stmt)
 
@@ -452,6 +462,7 @@ class Interpreter:
                 stmt.line,
                 f"'{stmt.subject}' is used here but was never declared with DECLARE.",
             )
+        self._ensure_scalar(symbol, stmt.subject, stmt.line)
         subject_value = symbol.value
         for value_node, branch_stmt in stmt.branches:
             case_value = self._eval(value_node)
@@ -471,11 +482,12 @@ class Interpreter:
     # ---- expression evaluation --------------------------------------------
 
     def _eval(self, node):
+        self._current_line = getattr(node, "line", self._current_line)
         method = self._EXPR_HANDLERS.get(type(node))
         if method is None:
             raise PseudocodeError(
                 getattr(node, "line", 0),
-                f"This kind of expression isn't supported yet ({type(node).__name__}).",
+                "This expression is not supported yet.",
             )
         return method(self, node)
 
@@ -550,11 +562,35 @@ class Interpreter:
             return left * right
         if op == "/":
             if right == 0:
-                raise PseudocodeError(line, "Division by zero.")
+                raise PseudocodeError(line, "Division by zero: the program tried to divide by zero.")
             result = left / right
+            if isinstance(result, float) and not math.isfinite(result):
+                raise PseudocodeError(
+                    line,
+                    "The division produced a number outside the supported REAL range.",
+                )
             return result
         if op == "^":
-            return left ** right
+            try:
+                result = left ** right
+            except ZeroDivisionError:
+                raise PseudocodeError(line, "Division by zero: the program tried to divide by zero.") from None
+            except (OverflowError, ValueError):
+                raise PseudocodeError(
+                    line,
+                    "The power calculation produced a number outside the supported range.",
+                ) from None
+            if isinstance(result, complex):
+                raise PseudocodeError(
+                    line,
+                    "The '^' operator must produce an INTEGER or REAL value.",
+                )
+            if isinstance(result, float) and not math.isfinite(result):
+                raise PseudocodeError(
+                    line,
+                    "The power calculation produced a number outside the supported REAL range.",
+                )
+            return result
 
     def _eval_relational(self, op, left, right, line):
         try:
@@ -618,7 +654,19 @@ class Interpreter:
         value, places = args
         self._expect_numeric("ROUND", value, line, "first argument")
         self._expect_integer("ROUND", places, line, "second argument (places)")
-        return round(float(value), places)
+        try:
+            result = round(value, places)
+        except (OverflowError, ValueError):
+            raise PseudocodeError(
+                line,
+                "ROUND could not represent the requested result within the supported range.",
+            ) from None
+        if isinstance(result, float) and not math.isfinite(result):
+            raise PseudocodeError(
+                line,
+                "ROUND produced a number outside the supported REAL range.",
+            )
+        return result
 
     def _builtin_random(self, args, line):
         self._expect_arg_count("RANDOM", args, 0, line)
@@ -707,7 +755,10 @@ class Interpreter:
             return "CHAR"
         if isinstance(value, str):
             return "STRING"
-        raise PseudocodeError(line, f"Couldn't determine a data type for '{name}'.")
+        raise PseudocodeError(
+            line,
+            f"Couldn't determine a supported pseudocode data type for '{name}'.",
+        )
 
     def _check_assignable(self, data_type, value, line, name):
         valid_types = _PYTHON_TYPES_FOR[data_type]
@@ -735,27 +786,22 @@ class Interpreter:
             )
 
     def _type_name(self, value) -> str:
-        if isinstance(value, bool):
-            return "BOOLEAN"
-        if isinstance(value, int):
-            return "INTEGER"
-        if isinstance(value, float):
-            return "REAL"
-        if isinstance(value, str) and len(value) == 1:
-            return "CHAR"
-        if isinstance(value, str):
-            return "STRING"
-        return type(value).__name__
+        return format_type_name(value)
 
     def _coerce_input(self, raw: str, data_type: str):
+        if not isinstance(raw, str):
+            raise ValueError(raw)
         if data_type == "INTEGER":
-            return int(raw)
+            return int(raw.strip())
         if data_type == "REAL":
-            return float(raw)
+            value = float(raw.strip())
+            if not math.isfinite(value):
+                raise ValueError(raw)
+            return value
         if data_type == "BOOLEAN":
-            if raw.strip().upper() in ("TRUE",):
+            if raw.strip().upper() == "TRUE":
                 return True
-            if raw.strip().upper() in ("FALSE",):
+            if raw.strip().upper() == "FALSE":
                 return False
             raise ValueError(raw)
         if data_type == "CHAR":

@@ -71,13 +71,17 @@ class RunSession:
         except PseudocodeError as e:
             self.state = "error"
             self.output_queue.put({"type": "error", "line": e.line, "message": e.message})
-        except Exception as e:
-            # A Python-level crash in the engine itself should never reach the
-            # student as a raw traceback (NFR-10) — surface it as a generic
-            # internal error instead.
+        except Exception:
+            # The engine has its own normalization safety net, but keep the
+            # web boundary equally strict: never expose a Python exception
+            # message or implementation detail to the student.
             self.state = "error"
             self.output_queue.put(
-                {"type": "error", "line": 0, "message": f"Internal error: {e}"}
+                {
+                    "type": "error",
+                    "line": 0,
+                    "message": "The program could not be completed because the compiler encountered an unexpected problem.",
+                }
             )
 
     # ---- called from the Flask request thread -----------------------

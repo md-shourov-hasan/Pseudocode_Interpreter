@@ -48,7 +48,7 @@ remain unimplemented.
 """
 
 from .tokens import Token, TokenType
-from .errors import PseudocodeError
+from .errors import PseudocodeError, describe_token
 from . import ast_nodes as ast
 
 _DATA_TYPE_TOKENS = {
@@ -107,7 +107,7 @@ class Parser:
         if self._check(type_):
             return self._advance()
         found = self._peek()
-        raise PseudocodeError(found.line, f"{message} (found '{found.lexeme or found.type.name}').")
+        raise PseudocodeError(found.line, f"{message} (found {describe_token(found)}).")
 
     # ---- program / statements ------------------------------------------
 
@@ -158,9 +158,35 @@ class Parser:
             return self._while_statement()
         if tok.type == TokenType.IDENTIFIER:
             return self._assignment_statement()
+        unsupported = {
+            TokenType.OPENFILE: "File handling statements are not supported yet.",
+            TokenType.READFILE: "File handling statements are not supported yet.",
+            TokenType.WRITEFILE: "File handling statements are not supported yet.",
+            TokenType.CLOSEFILE: "File handling statements are not supported yet.",
+            TokenType.PROCEDURE: "Procedures are not supported yet.",
+            TokenType.ENDPROCEDURE: "Procedures are not supported yet.",
+            TokenType.FUNCTION: "Functions are not supported yet.",
+            TokenType.ENDFUNCTION: "Functions are not supported yet.",
+            TokenType.CALL: "User-defined procedure/function calls are not supported yet.",
+            TokenType.RETURN: "RETURN is only valid inside a user-defined function, which is not supported yet.",
+        }
+        if tok.type in unsupported:
+            raise PseudocodeError(tok.line, unsupported[tok.type])
+
+        unexpected_endings = {
+            TokenType.ELSE: "ELSE does not have a matching IF statement.",
+            TokenType.ENDIF: "ENDIF does not have a matching IF statement.",
+            TokenType.NEXT: "NEXT does not have a matching FOR statement.",
+            TokenType.UNTIL: "UNTIL does not have a matching REPEAT statement.",
+            TokenType.ENDWHILE: "ENDWHILE does not have a matching WHILE statement.",
+            TokenType.ENDCASE: "ENDCASE does not have a matching CASE OF statement.",
+        }
+        if tok.type in unexpected_endings:
+            raise PseudocodeError(tok.line, unexpected_endings[tok.type])
+
         raise PseudocodeError(
             tok.line,
-            f"Expected a statement here, but found '{tok.lexeme or tok.type.name}'.",
+            f"Expected a statement here, but found {describe_token(tok)}.",
         )
 
     def _declare_statement(self):
@@ -352,7 +378,7 @@ class Parser:
             return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line)
         raise PseudocodeError(
             tok.line,
-            f"Expected a literal value for this CASE branch, but found '{tok.lexeme or tok.type.name}'.",
+            f"Expected a literal value for this CASE branch, but found {describe_token(tok)}.",
         )
 
     def _assignment_statement(self):
@@ -467,7 +493,7 @@ class Parser:
 
         raise PseudocodeError(
             tok.line,
-            f"Expected a value or expression here, but found '{tok.lexeme or tok.type.name}'.",
+            f"Expected a value or expression here, but found {describe_token(tok)}.",
         )
 
     def _finish_call(self, name_tok: Token):

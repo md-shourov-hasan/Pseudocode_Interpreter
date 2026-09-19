@@ -23,6 +23,8 @@ Design notes:
       parser uses them to know where one statement ends.
 """
 
+import math
+
 from .tokens import Token, TokenType, KEYWORDS
 from .errors import PseudocodeError
 
@@ -207,7 +209,13 @@ class Lexer:
             while self._peek().isdigit():
                 digits.append(self._advance())
             text = "".join(digits)
-            self._add(TokenType.REAL_LITERAL, text, float(text))
+            value = float(text)
+            if not math.isfinite(value):
+                raise PseudocodeError(
+                    start_line,
+                    "This REAL literal is outside the supported numeric range.",
+                )
+            self._add(TokenType.REAL_LITERAL, text, value)
             return
 
         text = "".join(digits)
