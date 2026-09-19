@@ -159,31 +159,6 @@ comparing strictly against the syllabus:
   "looks like a typo" error instead of silently parsing as
   `X <- -5`, which was a real bug users hit.
 
-### Error-handling guarantees (Milestone 10)
-
-- Lexer, parser, interpreter, and the web execution boundary use a single
-  student-facing error contract based on `PseudocodeError`.
-- Parser messages do not expose internal token names such as `EOF` or
-  `NEWLINE`.
-- Runtime arithmetic edge cases such as division by zero, invalid powers,
-  and non-finite REAL values are converted into clear pseudocode errors.
-- Runtime fallback handling prevents unexpected Python exception details from
-  being shown to users.
-- Errors retain the source line that caused them whenever a source line is
-  available.
-
-
-### Runtime safety (Milestone 11)
-
-- Web executions run in a dedicated child process so a runaway loop can
-  be **hard-terminated** without killing the Flask server thread.
-- The execution limit defaults to 10 seconds and can be overridden with
-  the `PSEUDOCODE_MAX_EXECUTION_SECONDS` environment variable.
-- Waiting for browser `INPUT` pauses the active execution timer; once the
-  input arrives, a new execution segment starts.
-- Direct engine callers can opt into the same student-facing timeout error
-  with `Interpreter(max_execution_seconds=...)` or the `run(...)` helper.
-
 ### Known limitations
 
 - **No persistent saved-program backend yet**; the current web interface
