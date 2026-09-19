@@ -60,6 +60,7 @@ function initializeEditor(monaco) {
     language.languageId,
     language.language,
   );
+  language.registerCompletionProvider(monaco);
   monaco.editor.defineTheme(language.theme.name, language.theme);
 
   editor = monaco.editor.create(editorHost, {

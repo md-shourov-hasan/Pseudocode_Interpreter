@@ -137,6 +137,92 @@ window.PseudocodeMonaco = Object.freeze({
     },
   },
 
+
+
+  // Level 1 completion is intentionally static. It provides the fixed
+  // vocabulary of the pseudocode language without attempting to inspect the
+  // current document, symbol table, or AST. Context-aware completion belongs
+  // to a later language-service milestone.
+  completions: [
+    { label: "IF", kind: "keyword", detail: "Selection keyword" },
+    { label: "THEN", kind: "keyword", detail: "Selection keyword" },
+    { label: "ELSE", kind: "keyword", detail: "Selection keyword" },
+    { label: "ENDIF", kind: "keyword", detail: "Selection keyword" },
+    { label: "CASE", kind: "keyword", detail: "Selection keyword" },
+    { label: "OF", kind: "keyword", detail: "Selection keyword" },
+    { label: "OTHERWISE", kind: "keyword", detail: "Selection keyword" },
+    { label: "ENDCASE", kind: "keyword", detail: "Selection keyword" },
+    { label: "FOR", kind: "keyword", detail: "Iteration keyword" },
+    { label: "TO", kind: "keyword", detail: "Iteration keyword" },
+    { label: "STEP", kind: "keyword", detail: "Iteration keyword" },
+    { label: "NEXT", kind: "keyword", detail: "Iteration keyword" },
+    { label: "REPEAT", kind: "keyword", detail: "Iteration keyword" },
+    { label: "UNTIL", kind: "keyword", detail: "Iteration keyword" },
+    { label: "WHILE", kind: "keyword", detail: "Iteration keyword" },
+    { label: "DO", kind: "keyword", detail: "Iteration keyword" },
+    { label: "ENDWHILE", kind: "keyword", detail: "Iteration keyword" },
+    { label: "DECLARE", kind: "keyword", detail: "Declaration keyword" },
+    { label: "CONSTANT", kind: "keyword", detail: "Declaration keyword" },
+    { label: "INPUT", kind: "keyword", detail: "Input keyword" },
+    { label: "OUTPUT", kind: "keyword", detail: "Output keyword" },
+    { label: "ARRAY", kind: "keyword", detail: "Array keyword" },
+    { label: "PROCEDURE", kind: "keyword", detail: "Procedure keyword" },
+    { label: "ENDPROCEDURE", kind: "keyword", detail: "Procedure keyword" },
+    { label: "FUNCTION", kind: "keyword", detail: "Function keyword" },
+    { label: "RETURNS", kind: "keyword", detail: "Function keyword" },
+    { label: "ENDFUNCTION", kind: "keyword", detail: "Function keyword" },
+    { label: "CALL", kind: "keyword", detail: "Procedure/function keyword" },
+    { label: "RETURN", kind: "keyword", detail: "Function keyword" },
+    { label: "OPENFILE", kind: "keyword", detail: "File-handling keyword" },
+    { label: "READFILE", kind: "keyword", detail: "File-handling keyword" },
+    { label: "WRITEFILE", kind: "keyword", detail: "File-handling keyword" },
+    { label: "CLOSEFILE", kind: "keyword", detail: "File-handling keyword" },
+    { label: "READ", kind: "keyword", detail: "File mode" },
+    { label: "WRITE", kind: "keyword", detail: "File mode" },
+    { label: "INTEGER", kind: "type", detail: "Data type" },
+    { label: "REAL", kind: "type", detail: "Data type" },
+    { label: "CHAR", kind: "type", detail: "Data type" },
+    { label: "STRING", kind: "type", detail: "Data type" },
+    { label: "BOOLEAN", kind: "type", detail: "Data type" },
+    { label: "TRUE", kind: "value", detail: "Boolean literal" },
+    { label: "FALSE", kind: "value", detail: "Boolean literal" },
+    { label: "AND", kind: "operator", detail: "Logical operator" },
+    { label: "OR", kind: "operator", detail: "Logical operator" },
+    { label: "NOT", kind: "operator", detail: "Logical operator" },
+    { label: "ROUND", kind: "function", detail: "Built-in function" },
+    { label: "RANDOM", kind: "function", detail: "Built-in function" },
+    { label: "DIV", kind: "function", detail: "Built-in function" },
+    { label: "MOD", kind: "function", detail: "Built-in function" },
+    { label: "LENGTH", kind: "function", detail: "Built-in function" },
+    { label: "LCASE", kind: "function", detail: "Built-in function" },
+    { label: "UCASE", kind: "function", detail: "Built-in function" },
+    { label: "SUBSTRING", kind: "function", detail: "Built-in function" },
+  ],
+
+  registerCompletionProvider(monaco) {
+    const kindMap = {
+      keyword: monaco.languages.CompletionItemKind.Keyword,
+      type: monaco.languages.CompletionItemKind.TypeParameter,
+      value: monaco.languages.CompletionItemKind.Value,
+      operator: monaco.languages.CompletionItemKind.Operator,
+      function: monaco.languages.CompletionItemKind.Function,
+    };
+
+    const suggestions = this.completions.map((item) => ({
+      label: item.label,
+      kind: kindMap[item.kind] ?? monaco.languages.CompletionItemKind.Text,
+      detail: item.detail,
+      insertText: item.label,
+      sortText: item.label,
+    }));
+
+    return monaco.languages.registerCompletionItemProvider(this.languageId, {
+      provideCompletionItems() {
+        return { suggestions };
+      },
+    });
+  },
+
   theme: {
     name: "igcse-pseudocode-dark",
     base: "vs-dark",
