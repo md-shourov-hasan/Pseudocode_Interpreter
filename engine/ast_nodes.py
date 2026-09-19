@@ -67,8 +67,13 @@ class Constant:
 
 @dataclass
 class Input:
-    """INPUT <identifier>   (FR-4.1)"""
-    identifier: str
+    """INPUT <identifier>   (FR-4.1), or INPUT <identifier>[<index>...]
+    to read directly into an array element.
+
+    `target` is an Identifier node for a plain variable, or an Index
+    node for an array element — mirrors Assignment.target.
+    """
+    target: object
     line: int
 
 

@@ -114,6 +114,20 @@ class Lexer:
         # Multi-character operators (maximal munch) then single-character
         if ch == "<":
             if self._match("-"):
+                # "<--" (no space before the second "-") is almost always a
+                # typo for "<-" with an extra dash, not a deliberate
+                # "assign a negative number written with zero spacing" —
+                # silently accepting it turns a typo into a different,
+                # valid-but-wrong program (e.g. "X <-- 5" quietly becomes
+                # "X <- -5"). Catch it here instead of letting it through.
+                # "X <- -5" (WITH a space before the minus) is unaffected
+                # and still works exactly as intended.
+                if self._peek() == "-":
+                    raise PseudocodeError(
+                        self.line,
+                        "Found '<--'. This looks like a typo for the assignment arrow '<-'. "
+                        "If you meant to assign a negative number, add a space: '<- -5'.",
+                    )
                 self._add(TokenType.ASSIGN, "<-")
             elif self._match("="):
                 self._add(TokenType.LESS_EQUAL, "<=")

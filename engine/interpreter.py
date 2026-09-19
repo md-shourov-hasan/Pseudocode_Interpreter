@@ -9,8 +9,10 @@ Implements:
     FR-3.2        CONSTANT declares a value that cannot be reassigned
     FR-3.3        Assignment evaluates an expression and stores it
     FR-3.4        Undeclared-identifier and type-mismatch errors
-    FR-4.1        INPUT reads a value from the user
-    FR-4.2        OUTPUT displays one or more values
+    FR-4.1        INPUT reads a value from the user (or, extended on
+                  request, directly into an array element)
+    FR-4.2        OUTPUT displays one or more values (or, extended on
+                  request, every element of a bare array, one per line)
     FR-5.1        Arithmetic operators (+ - * / ^)
     FR-5.4        Relational operators (= < <= > >= <>)
     FR-7.1        IF ... THEN ... ENDIF (no ELSE)
@@ -295,7 +297,10 @@ class Interpreter:
         return value
 
     def _exec_input(self, stmt):
-        name = stmt.identifier
+        if isinstance(stmt.target, ast.Index):
+            self._exec_array_input(stmt)
+            return
+        name = stmt.target.name
         symbol = self.symbols.get(name)
         if symbol is None:
             raise PseudocodeError(
@@ -313,9 +318,60 @@ class Interpreter:
             )
         symbol.value = value
 
+    def _exec_array_input(self, stmt):
+        """INPUT <identifier>[<index>...] — reads directly into an array
+        element (FR-4.1 combined with FR-8.2/FR-8.4)."""
+        target = stmt.target
+        symbol, index_tuple = self._resolve_array_element(target.name, target.indices, stmt.line)
+        raw = self._input_fn()
+        try:
+            value = self._coerce_input(raw, symbol.data_type)
+        except ValueError:
+            raise PseudocodeError(
+                stmt.line,
+                f"Couldn't read '{raw}' as a {symbol.data_type} value for '{target.name}[...]'.",
+            )
+        symbol.value[index_tuple] = value
+
     def _exec_output(self, stmt):
-        parts = [self._format_value(self._eval(v)) for v in stmt.values]
-        self._output_fn("".join(parts))
+        # OUTPUT <array> (no index) prints every element on its own line,
+        # rather than being joined into the usual single OUTPUT line — an
+        # extension of FR-4.2, added on request. OUTPUT <array>[i] is an
+        # ordinary element read and is untouched; only a *bare* array
+        # identifier triggers this. Anything else builds up one line as
+        # before, joining comma-separated values with no separator.
+        pending = []
+        for value_node in stmt.values:
+            array_symbol = self._array_symbol_for_bare_output(value_node)
+            if array_symbol is not None:
+                if pending:
+                    self._output_fn("".join(pending))
+                    pending = []
+                for index_tuple in self._array_indices_in_order(array_symbol):
+                    self._output_fn(self._format_value(array_symbol.value[index_tuple]))
+                continue
+            pending.append(self._format_value(self._eval(value_node)))
+        if pending:
+            self._output_fn("".join(pending))
+
+    def _array_symbol_for_bare_output(self, value_node):
+        if not isinstance(value_node, ast.Identifier):
+            return None
+        symbol = self.symbols.get(value_node.name)
+        return symbol if (symbol is not None and symbol.is_array) else None
+
+    def _array_indices_in_order(self, symbol):
+        """Every valid index tuple for an array, in natural reading order
+        (1D: sequential; 2D: row-major)."""
+        if len(symbol.dimensions) == 1:
+            (lo, hi) = symbol.dimensions[0]
+            for i in range(lo, hi + 1):
+                yield (i,)
+        else:
+            (r_lo, r_hi), (c_lo, c_hi) = symbol.dimensions
+            for r in range(r_lo, r_hi + 1):
+                for c in range(c_lo, c_hi + 1):
+                    yield (r, c)
 
     def _exec_for(self, stmt: ast.ForLoop):
         start = self._eval(stmt.start)

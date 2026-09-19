@@ -13,7 +13,7 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     array_type     := ARRAY '[' bound_pair (',' bound_pair)? ']' OF data_type  -- FR-8.1, FR-8.3
     bound_pair     := expression ':' expression
     constant_stmt  := CONSTANT IDENTIFIER ASSIGN expression
-    input_stmt     := INPUT IDENTIFIER
+    input_stmt     := INPUT ( IDENTIFIER | IDENTIFIER '[' arglist ']' )      -- FR-4.1, FR-8.2/FR-8.4
     output_stmt    := OUTPUT expression ( ',' expression )*
     if_stmt        := IF expression THEN block ( ELSE block )? ENDIF        -- FR-7.1, FR-7.2
     case_stmt      := CASE OF IDENTIFIER (case_value COLON statement)*
@@ -223,7 +223,11 @@ class Parser:
     def _input_statement(self):
         line = self._advance().line  # consume INPUT
         name_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after INPUT")
-        return ast.Input(name_tok.lexeme, line)
+        if self._check(TokenType.LBRACKET):
+            target = self._finish_index(name_tok)  # INPUT <identifier>[<index>...]
+        else:
+            target = ast.Identifier(name_tok.lexeme, name_tok.line)
+        return ast.Input(target, line)
 
     def _output_statement(self):
         line = self._advance().line  # consume OUTPUT
