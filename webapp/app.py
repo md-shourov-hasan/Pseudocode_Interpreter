@@ -63,7 +63,8 @@ def submit_input(run_id):
     if session.state != "waiting_for_input":
         return jsonify({"error": "This program isn't waiting for input right now."}), 409
     data = request.get_json(silent=True) or {}
-    session.provide_input(data.get("value", ""))
+    if not session.provide_input(data.get("value", "")):
+        return jsonify({"error": "This program is no longer waiting for input."}), 409
     return jsonify({"ok": True})
 
 

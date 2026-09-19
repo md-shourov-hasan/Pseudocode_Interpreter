@@ -129,7 +129,7 @@ directly.
 | 8 | Procedures & functions | ⏳ Not started |
 | 9 | File handling (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) | ⏳ Not started |
 | 10 | Error handling pass (consistency audit across all features) | ✅ Done |
-| 11 | Runtime safety (hard execution timeout / infinite-loop protection) | ⏳ Not started |
+| 11 | Runtime safety (hard execution timeout / infinite-loop protection) | ✅ Done |
 
 Milestone 12 was pulled forward and scoped down early to make manual
 testing easier; it currently covers a working local editor with live
@@ -172,13 +172,23 @@ comparing strictly against the syllabus:
 - Errors retain the source line that caused them whenever a source line is
   available.
 
+
+### Runtime safety (Milestone 11)
+
+- Web executions run in a dedicated child process so a runaway loop can
+  be **hard-terminated** without killing the Flask server thread.
+- The execution limit defaults to 10 seconds and can be overridden with
+  the `PSEUDOCODE_MAX_EXECUTION_SECONDS` environment variable.
+- Waiting for browser `INPUT` pauses the active execution timer; once the
+  input arrives, a new execution segment starts.
+- Direct engine callers can opt into the same student-facing timeout error
+  with `Interpreter(max_execution_seconds=...)` or the `run(...)` helper.
+
 ### Known limitations
 
-- **No hard execution timeout yet** (Milestone 11). Loops exist as of
-  Milestone 6, so a genuine infinite loop (e.g. a `WHILE` whose
-  condition never becomes FALSE) will hang that run. The web
-  frontend's `run_session.py` can currently only *report* a timeout
-  after the fact, not force-stop a runaway thread.
+- **No persistent saved-program backend yet**; the current web interface
+  remains an in-memory/local execution tool rather than a multi-user
+  account system.
 - **No user-defined procedures/functions yet** (Milestone 8) — calling
   anything that isn't one of the built-in library functions gives a
   clear "not supported yet" error rather than failing silently.

@@ -59,24 +59,23 @@ the element type's default value at DECLARE time. That trades a little
 memory for simplicity — fine at the scale of a student program, but
 not something you'd want for, say, a 1,000,000-element array.
 
-NFR-3 note: loops make genuine infinite loops possible for the first
-time (e.g. a WHILE whose condition never becomes FALSE). This
-interpreter does not yet enforce an execution time limit or iteration
-cap itself — that hard-termination work is Milestone 11's. The web
-frontend's run_session.py can currently only *report* a timeout after
-the fact, not stop a runaway thread; treat that as a known gap until
-M11, not a guarantee.
+NFR-3 note: callers can configure a cooperative execution time limit
+with ``max_execution_seconds``. The web interface additionally runs each
+program in a separate process so the parent can hard-terminate a runaway
+execution rather than relying on a Python thread.
 
 Design: a tree-walking interpreter. `Interpreter.run(program)` executes
-every statement in order and returns the list of OUTPUT lines produced
-(the web frontend in Milestone 12 will stream these instead of
-collecting them, but batching them is simplest for now and for tests).
-INPUT is satisfied by an injectable `input_fn` so tests don't need a
-real stdin/stdout, and so Milestone 12 can wire it up to a web prompt.
+every statement in order and returns the list of OUTPUT lines produced.
+INPUT is satisfied by an injectable `input_fn` so tests don't need a real
+stdin/stdout, and so the web interface can wire it up to a browser prompt.
+When ``max_execution_seconds`` is set, the interpreter checks the elapsed
+monotonic time between statements and loop iterations and raises a
+student-facing ``PseudocodeError`` when the limit is exceeded.
 """
 
 import math
 import random
+import time
 
 from . import ast_nodes as ast
 from .errors import PseudocodeError, format_type_name, normalize_unexpected_error
@@ -115,7 +114,7 @@ class Symbol:
 
 
 class Interpreter:
-    def __init__(self, input_fn=None, output_fn=None):
+    def __init__(self, input_fn=None, output_fn=None, max_execution_seconds=None):
         """
         input_fn:  callable() -> str, used to satisfy INPUT statements.
                    Defaults to the real `input()`.
@@ -128,10 +127,21 @@ class Interpreter:
         self._input_fn = input_fn if input_fn is not None else input
         self._output_fn = output_fn if output_fn is not None else self.output.append
         self._current_line = 0
+        self._max_execution_seconds = max_execution_seconds
+        self._execution_started_at = None
+        if max_execution_seconds is not None:
+            if (
+                not isinstance(max_execution_seconds, (int, float))
+                or isinstance(max_execution_seconds, bool)
+                or not math.isfinite(float(max_execution_seconds))
+                or max_execution_seconds <= 0
+            ):
+                raise ValueError("max_execution_seconds must be a finite positive number or None")
 
     # ---- public API -----------------------------------------------------
 
     def run(self, program: ast.Program) -> list[str]:
+        self._execution_started_at = time.monotonic()
         try:
             for stmt in program.statements:
                 self._exec_statement(stmt)
@@ -143,9 +153,22 @@ class Interpreter:
             # never leak through the public interpreter API.
             raise normalize_unexpected_error(self._current_line, exc) from None
 
+    def _check_execution_timeout(self, line=None):
+        """Raise a language-level timeout once the configured run limit is exceeded."""
+        if self._max_execution_seconds is None or self._execution_started_at is None:
+            return
+        if time.monotonic() - self._execution_started_at >= self._max_execution_seconds:
+            error_line = line if line is not None else self._current_line
+            seconds = f"{self._max_execution_seconds:g}"
+            raise PseudocodeError(
+                error_line or 0,
+                f"Execution exceeded the {seconds}-second time limit (possible infinite loop).",
+            )
+
     # ---- statement execution --------------------------------------------
 
     def _exec_statement(self, stmt):
+        self._check_execution_timeout(getattr(stmt, "line", 0))
         self._current_line = getattr(stmt, "line", 0)
         handler = self._STATEMENT_HANDLERS.get(type(stmt))
         if handler is None:
@@ -413,6 +436,7 @@ class Interpreter:
         value = start
         ascending = step > 0
         while (value <= finish) if ascending else (value >= finish):
+            self._check_execution_timeout(stmt.line)
             self._store(symbol, value, stmt.line, stmt.variable)
             for s in stmt.body:
                 self._exec_statement(s)
@@ -420,6 +444,7 @@ class Interpreter:
 
     def _exec_repeat(self, stmt: ast.RepeatLoop):
         while True:
+            self._check_execution_timeout(stmt.line)
             for s in stmt.body:
                 self._exec_statement(s)
             condition = self._eval(stmt.until_condition)
@@ -433,6 +458,7 @@ class Interpreter:
 
     def _exec_while(self, stmt: ast.WhileLoop):
         while True:
+            self._check_execution_timeout(stmt.line)
             condition = self._eval(stmt.condition)
             if not isinstance(condition, bool):
                 raise PseudocodeError(
@@ -863,6 +889,15 @@ Interpreter._BUILTIN_HANDLERS = {
 }
 
 
-def run(program: ast.Program, input_fn=None, output_fn=None) -> list[str]:
+def run(
+    program: ast.Program,
+    input_fn=None,
+    output_fn=None,
+    max_execution_seconds=None,
+) -> list[str]:
     """Convenience wrapper: run a full Program and return its output lines."""
-    return Interpreter(input_fn=input_fn, output_fn=output_fn).run(program)
+    return Interpreter(
+        input_fn=input_fn,
+        output_fn=output_fn,
+        max_execution_seconds=max_execution_seconds,
+    ).run(program)
