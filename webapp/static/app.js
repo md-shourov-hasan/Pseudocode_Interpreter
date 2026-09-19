@@ -85,13 +85,26 @@ function initializeEditor(monaco) {
     lineNumbersMinChars: 3,
     roundedSelection: false,
     contextmenu: true,
-    // Enter must always mean "new line". Accepting a suggestion is Tab-only.
-    acceptSuggestionOnEnter: "off",
+    // Enter accepts the highlighted suggestion, but only when that changes the
+    // text: typing DE + Enter completes to DECLARE, while a fully typed keyword
+    // (ENDIF + Enter) just starts a new line. Tab is handled separately below.
+    acceptSuggestionOnEnter: "smart",
     acceptSuggestionOnCommitCharacter: false,
     suggest: {
       showWords: false,
     },
   });
+
+  // Enter accepts a suggestion; Tab never does. While the suggestion list is
+  // open, Tab closes it and indents as usual.
+  editor.addCommand(
+    monaco.KeyCode.Tab,
+    () => {
+      editor.trigger("keyboard", "hideSuggestWidget", null);
+      editor.trigger("keyboard", "tab", null);
+    },
+    "suggestWidgetVisible && textInputFocus",
+  );
 
   runBtn.disabled = false;
   setStatus("", "Idle");

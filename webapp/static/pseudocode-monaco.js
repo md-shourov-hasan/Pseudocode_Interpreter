@@ -235,6 +235,10 @@ window.PseudocodeMonaco = Object.freeze({
         // the identifier "Cnt" would otherwise match CONSTANT.
         const word = model.getWordUntilPosition(position);
         const prefix = word.word.toUpperCase();
+        // Single-letter words are almost always loop counters or variables
+        // (i, j, n, t ...). Offering IF/INPUT/NEXT/TO for them means Enter
+        // would rewrite the variable, so suggest from two characters up.
+        if (word.word.length === 1) return { suggestions: [], incomplete: true };
         const range = {
           startLineNumber: position.lineNumber,
           endLineNumber: position.lineNumber,
