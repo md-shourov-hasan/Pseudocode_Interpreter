@@ -85,6 +85,9 @@ function initializeEditor(monaco) {
     lineNumbersMinChars: 3,
     roundedSelection: false,
     contextmenu: true,
+    // Enter must always mean "new line". Accepting a suggestion is Tab-only.
+    acceptSuggestionOnEnter: "off",
+    acceptSuggestionOnCommitCharacter: false,
     suggest: {
       showWords: false,
     },

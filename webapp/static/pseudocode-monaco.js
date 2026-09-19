@@ -49,9 +49,9 @@ window.PseudocodeMonaco = Object.freeze({
     // named terminators (ENDIF, NEXT, ENDWHILE, ...).
     indentationRules: {
       increaseIndentPattern:
-        /^\s*(?:(?:IF\b.*\bTHEN\s*$)|(?:FOR\b.*$)|(?:REPEAT\s*$)|(?:WHILE\b.*\bDO\s*$)|(?:CASE\s+OF\b.*$)|(?:PROCEDURE\b.*$)|(?:FUNCTION\b.*$))$/,
+        /^\s*(?:(?:IF\b.*\bTHEN\s*$)|(?:FOR\b.*$)|(?:REPEAT\s*$)|(?:WHILE\b.*\bDO\s*$)|(?:CASE\s+OF\b.*$)|(?:PROCEDURE\b.*$)|(?:FUNCTION\b.*$)|(?:ELSE\s*$))$/,
       decreaseIndentPattern:
-        /^\s*(?:ENDIF\b|NEXT\b|UNTIL\b|ENDWHILE\b|ENDCASE\b|ENDPROCEDURE\b|ENDFUNCTION\b|ELSE\b|OTHERWISE\b).*$/,
+        /^\s*(?:ENDIF\b|NEXT\b|UNTIL\b|ENDWHILE\b|ENDCASE\b|ENDPROCEDURE\b|ENDFUNCTION\b|ELSE\b).*$/,
     },
 
     // onEnterRules refine the block behavior for lines where entering a new
@@ -60,10 +60,6 @@ window.PseudocodeMonaco = Object.freeze({
     onEnterRules: [
       {
         beforeText: /^\s*(?:IF\b.*\bTHEN|FOR\b.*|REPEAT\b|WHILE\b.*\bDO|CASE\s+OF\b.*|PROCEDURE\b.*|FUNCTION\b.*)\s*$/,
-        action: { indentAction: 1 }, // Indent
-      },
-      {
-        beforeText: /^\s*(?:ELSE\b|OTHERWISE\b).*$/,
         action: { indentAction: 1 }, // Indent
       },
       {
@@ -217,8 +213,40 @@ window.PseudocodeMonaco = Object.freeze({
     }));
 
     return monaco.languages.registerCompletionItemProvider(this.languageId, {
-      provideCompletionItems() {
-        return { suggestions };
+      provideCompletionItems(model, position) {
+        const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+
+        // Level 1 stays static, but should still stay quiet inside comments
+        // and string/CHAR literals, where keywords are never valid.
+        let inString = null;
+        for (let i = 0; i < line.length; i += 1) {
+          const ch = line[i];
+          if (inString) {
+            if (ch === inString) inString = null;
+          } else if (ch === '"' || ch === "'") {
+            inString = ch;
+          } else if (ch === "/" && line[i + 1] === "/") {
+            return { suggestions: [] };
+          }
+        }
+        if (inString) return { suggestions: [] };
+
+        // Prefix-only matching. Monaco's own filter is fuzzy (subsequence), so
+        // the identifier "Cnt" would otherwise match CONSTANT.
+        const word = model.getWordUntilPosition(position);
+        const prefix = word.word.toUpperCase();
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+        return {
+          suggestions: suggestions
+            .filter((s) => s.label.startsWith(prefix))
+            .map((s) => ({ ...s, range })),
+          incomplete: true, // re-query on every keystroke so the prefix filter stays current
+        };
       },
     });
   },
