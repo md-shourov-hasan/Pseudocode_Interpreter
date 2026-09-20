@@ -75,7 +75,7 @@ Pseudocode_Interpreter/
 │   ├── test_library_functions.py     ROUND, RANDOM, DIV, MOD, LENGTH, LCASE, UCASE, SUBSTRING
 │   ├── test_iteration.py             FOR/NEXT, REPEAT/UNTIL, WHILE/DO/ENDWHILE
 │   ├── test_arrays.py                1D and 2D array declaration, indexing, bounds checking
-│   ├── test_array_io.py              INPUT into an array element, OUTPUT of a whole array
+│   ├── test_array_io.py              INPUT into an array element; OUTPUT of a whole array is refused
 │   ├── test_lexer_typo_detection.py  Catches the "<--" typo instead of misparsing it
 │   ├── test_error_handling.py         Milestone 10 cross-stage error contract and runtime edge cases
 │   └── test_web_error_handling.py     Web API validation/error boundary checks
@@ -124,7 +124,7 @@ directly.
 | 4 | Library functions (ROUND, RANDOM, DIV, MOD, LENGTH, LCASE, UCASE, SUBSTRING) | ✅ Done |
 | 5 | Selection (IF/ELSE/ENDIF, CASE OF/OTHERWISE/ENDCASE) | ✅ Done |
 | 6 | Iteration (FOR/NEXT, REPEAT/UNTIL, WHILE/DO/ENDWHILE) | ✅ Done |
-| 7 | Arrays (1D and 2D, plus INPUT/OUTPUT extensions) | ✅ Done |
+| 7 | Arrays (1D and 2D, plus INPUT into an element) | ✅ Done |
 | 12 | Web interface | 🟡 Local test slice done (see note below) |
 | 8 | Procedures & functions | ⏳ Not started |
 | 9 | File handling (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) | ⏳ Not started |
@@ -146,9 +146,8 @@ comparing strictly against the syllabus:
   `IF NOT IsSorted AND (A = 1 OR B <> 2) THEN`), with `NOT` binding
   tightest, then `AND`, then `OR` — parentheses override as usual.
 - **Multiple identifiers per `DECLARE`**: `DECLARE a, b, c : INTEGER`.
-- **`INPUT`/`OUTPUT` on array elements and whole arrays**:
-  `INPUT MyArray[3]` reads directly into an element; `OUTPUT MyArray`
-  (no index) prints every element on its own line.
+- **`INPUT` into an array element**: `INPUT MyArray[3]` reads
+  directly into an element.
 - **REAL → INTEGER narrowing**: assigning a REAL result (e.g. from
   `/`) into an INTEGER variable truncates toward zero instead of
   raising a type error, since ordinary division always produces a
@@ -168,6 +167,11 @@ comparing strictly against the syllabus:
   anything that isn't one of the built-in library functions gives a
   clear "not supported yet" error rather than failing silently.
 - **No file handling yet** (Milestone 9).
+- **Arrays are used one element at a time**, following the SRS. A whole
+  array can't be assigned, copied or output: `MyArray <- [1, 2, 3]`,
+  `B <- A` and `OUTPUT MyArray` are all reported as errors that say how
+  to use an index instead (`MyArray[1] <- value`, `OUTPUT MyArray[1]`).
 - Array storage is a simple dict keyed by index tuple, eagerly filled
   with default values at `DECLARE` time — fine at student-program
-  scale, not tuned for very large arrays.
+  scale. A program may hold at most 1,000,000 array elements in total;
+  a larger `DECLARE` is refused with an error.

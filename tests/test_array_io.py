@@ -84,67 +84,73 @@ def test_input_into_undeclared_array_is_clear_error():
         run_src("INPUT MyArray[1]", inputs=["1"])
 
 
-# ---- OUTPUT of a whole array (bare identifier) -----------------------
+# ---- OUTPUT of a whole array is refused ---------------------------------
+# An array's elements are output one at a time through an index. A bare array
+# name is not a value, so OUTPUT MyArray is an error that says how to do it.
 
-def test_output_1d_array_prints_one_element_per_line():
-    output, _ = run_src(
-        "DECLARE MyArray : ARRAY[1:5] OF INTEGER\n"
-        "MyArray[1] <- 10\nMyArray[2] <- 20\nMyArray[3] <- 30\nMyArray[4] <- 40\nMyArray[5] <- 50\n"
-        "OUTPUT MyArray"
+WHOLE_ARRAY_OUTPUT_CASES = [
+    "DECLARE MyArray : ARRAY[1:5] OF INTEGER\nMyArray[1] <- 10\nOUTPUT MyArray",
+    "DECLARE MyArray : ARRAY[5:7] OF INTEGER\nOUTPUT MyArray",
+    "DECLARE MyArray : ARRAY[1:2, 1:2] OF INTEGER\nOUTPUT MyArray",
+    'DECLARE MyArray : ARRAY[1:2] OF STRING\nMyArray[1] <- "Alice"\nOUTPUT MyArray',
+    "DECLARE MyArray : ARRAY[1:3] OF INTEGER\nOUTPUT MyArray",
+]
+
+
+@pytest.mark.parametrize("src", WHOLE_ARRAY_OUTPUT_CASES)
+def test_output_of_a_whole_array_is_an_error_that_explains_what_to_do(src):
+    with pytest.raises(PseudocodeError) as info:
+        run_src(src)
+    assert info.value.line == src.count("\n") + 1  # the OUTPUT line
+    assert info.value.message == (
+        "'MyArray' is an array, so it can't be output as a whole. "
+        "Output each element separately using its index, e.g. OUTPUT MyArray[1]."
     )
-    assert output == ["10", "20", "30", "40", "50"]
 
 
-def test_output_1d_array_with_non_default_bounds():
+@pytest.mark.parametrize(
+    "output_statement",
+    ['OUTPUT "Numbers:", Numbers', 'OUTPUT Numbers, " are the numbers"', 'OUTPUT 1, Numbers, 2'],
+)
+def test_a_whole_array_among_other_values_prints_nothing_at_all(output_statement):
+    printed = []
+    interp = Interpreter(output_fn=printed.append)
+    program = parse_src("DECLARE Numbers : ARRAY[1:3] OF INTEGER\n" + output_statement)
+    with pytest.raises(PseudocodeError, match="can't be output as a whole"):
+        interp.run(program)
+    assert printed == []
+
+
+def test_outputting_each_element_by_index_is_the_way_to_show_a_1d_array():
     output, _ = run_src(
-        "DECLARE Ages : ARRAY[5:7] OF INTEGER\nAges[5] <- 1\nAges[6] <- 2\nAges[7] <- 3\nOUTPUT Ages"
+        "DECLARE Numbers : ARRAY[1:3] OF INTEGER\nDECLARE i : INTEGER\n"
+        "Numbers[1] <- 10\nNumbers[2] <- 20\nNumbers[3] <- 30\n"
+        "FOR i <- 1 TO 3\n  OUTPUT Numbers[i]\nNEXT i"
     )
-    assert output == ["1", "2", "3"]
+    assert output == ["10", "20", "30"]
 
 
-def test_output_2d_array_prints_row_major_one_per_line():
+def test_outputting_each_element_by_index_is_the_way_to_show_a_2d_array():
     output, _ = run_src(
-        "DECLARE Grid : ARRAY[1:2, 1:2] OF INTEGER\n"
+        "DECLARE Grid : ARRAY[1:2, 1:2] OF INTEGER\nDECLARE r, c : INTEGER\n"
         "Grid[1, 1] <- 1\nGrid[1, 2] <- 2\nGrid[2, 1] <- 3\nGrid[2, 2] <- 4\n"
-        "OUTPUT Grid"
+        "FOR r <- 1 TO 2\n  FOR c <- 1 TO 2\n    OUTPUT Grid[r, c]\n  NEXT c\nNEXT r"
     )
     assert output == ["1", "2", "3", "4"]
 
 
-def test_output_array_of_strings():
-    output, _ = run_src(
-        'DECLARE Names : ARRAY[1:2] OF STRING\nNames[1] <- "Alice"\nNames[2] <- "Bob"\nOUTPUT Names'
-    )
-    assert output == ["Alice", "Bob"]
-
-
-def test_output_array_uses_default_values_if_unset():
-    output, _ = run_src("DECLARE Numbers : ARRAY[1:3] OF INTEGER\nOUTPUT Numbers")
-    assert output == ["0", "0", "0"]
-
-
-def test_output_indexed_element_is_unaffected_by_array_output_change():
-    # OUTPUT MyArray[i] must remain an ordinary single-line scalar read.
+def test_output_indexed_element_is_an_ordinary_read():
+    # OUTPUT MyArray[i] is a normal single-line scalar read.
     output, _ = run_src(
         "DECLARE MyArray : ARRAY[1:3] OF INTEGER\nMyArray[2] <- 99\nOUTPUT MyArray[2]"
     )
     assert output == ["99"]
 
 
-def test_output_scalar_values_unaffected_by_array_output_change():
-    # Regression check: OUTPUT with several ordinary (non-array) values
-    # must still be joined onto a single line, as before.
+def test_output_scalar_values_are_joined_onto_one_line():
+    # OUTPUT with several ordinary (non-array) values is joined onto a single
+    # line, with no separator.
     output, _ = run_src(
         "DECLARE A : INTEGER\nDECLARE B : INTEGER\nA <- 1\nB <- 2\nOUTPUT A, B"
     )
     assert output == ["12"]
-
-
-def test_output_mixing_text_and_a_whole_array():
-    # A prefix, followed by the array's elements each on their own line.
-    output, _ = run_src(
-        "DECLARE Numbers : ARRAY[1:3] OF INTEGER\n"
-        "Numbers[1] <- 1\nNumbers[2] <- 2\nNumbers[3] <- 3\n"
-        'OUTPUT "Numbers:", Numbers'
-    )
-    assert output == ["Numbers:", "1", "2", "3"]

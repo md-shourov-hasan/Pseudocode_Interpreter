@@ -149,16 +149,12 @@ def test_more_than_two_dimensions_is_rejected_by_parser():
 
 # ---- using a whole array where a scalar is expected -----------------------
 
-def test_bare_array_in_output_prints_every_element_on_its_own_line():
-    # Was an error through the initial array milestone; now OUTPUT of a
-    # bare array prints all its elements, one per line (extension, added
-    # on request).
-    output, _ = run_src(
-        "DECLARE Numbers : ARRAY[1:5] OF INTEGER\n"
-        "Numbers[1] <- 10\nNumbers[2] <- 20\nNumbers[3] <- 30\nNumbers[4] <- 40\nNumbers[5] <- 50\n"
-        "OUTPUT Numbers"
-    )
-    assert output == ["10", "20", "30", "40", "50"]
+def test_bare_array_in_output_is_a_clear_error():
+    # OUTPUT of a whole array was once an extension (every element, one per
+    # line). It has been removed: the SRS has no such statement, so it is an
+    # error that points the student to output each element through an index.
+    with pytest.raises(PseudocodeError, match="can't be output as a whole"):
+        run_src("DECLARE Numbers : ARRAY[1:5] OF INTEGER\nOUTPUT Numbers")
 
 
 def test_assigning_directly_to_bare_array_identifier_is_clear_error():

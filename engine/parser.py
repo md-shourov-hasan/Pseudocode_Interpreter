@@ -24,9 +24,6 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     repeat_stmt    := REPEAT block UNTIL expression                         -- FR-6.4
     while_stmt     := WHILE expression DO block ENDWHILE                    -- FR-6.5
     assignment_stmt:= ( IDENTIFIER | IDENTIFIER '[' arglist ']' ) ASSIGN expression  -- FR-8.2, FR-8.4
-                    | IDENTIFIER ASSIGN array_literal                                -- fill a whole array
-    array_literal  := '[' [ element ( ',' element )* ] ']'      (newlines allowed inside)
-    element        := expression | array_literal                (nested only for 2D arrays)
     data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
 
     expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
@@ -497,52 +494,16 @@ class Parser:
             target = ast.Identifier(name_tok.lexeme, name_tok.line)
         self._expect(TokenType.ASSIGN, "Expected '<-' to assign a value")
         if self._check(TokenType.LBRACKET):
-            # MyArray <- [v1, v2, ...]: fills a whole array. Only a bare
-            # identifier can take a list; the interpreter checks that it names
-            # an array of the right shape.
-            if isinstance(target, ast.Index):
-                raise PseudocodeError(
-                    self._peek().line,
-                    f"A list of values can only fill a whole array, not the single element "
-                    f"'{name_tok.lexeme}[...]'. Assign one value, or leave off the index.",
-                )
-            value = self._array_literal(depth=1)
-        else:
-            value = self._expression()
-        return ast.Assignment(target, value, name_tok.line)
-
-    def _array_literal(self, depth: int):
-        """[v1, v2, ...] or, for a 2D array, [[...], [...]]. The list may span
-        several lines. `depth` is 1 for the outer list, 2 for a row list."""
-        open_tok = self._advance()  # consume '['
-        elements = []
-        self._skip_newlines()
-        if not self._check(TokenType.RBRACKET):
-            while True:
-                if self._check(TokenType.LBRACKET):
-                    if depth >= 2:
-                        raise PseudocodeError(
-                            self._peek().line,
-                            "Lists can only be nested two levels deep (a list of rows, "
-                            "for a 2D array).",
-                        )
-                    elements.append(self._array_literal(depth + 1))
-                else:
-                    elements.append(self._expression())
-                self._skip_newlines()
-                if not self._match(TokenType.COMMA):
-                    break
-                self._skip_newlines()
-        if not self._check(TokenType.RBRACKET):
-            found = self._peek()
-            if found.type == TokenType.EOF:
-                raise PseudocodeError(open_tok.line, "This list is missing its closing ']'.")
+            # "MyArray <- [1, 2, 3]" is not part of the language: an array is
+            # filled one element at a time, through its index.
             raise PseudocodeError(
-                found.line,
-                f"Expected ',' or ']' in this list of values, but found {describe_token(found)}.",
+                self._peek().line,
+                f"A list of values can't be assigned to '{name_tok.lexeme}' in one step. "
+                f"An array is filled one element at a time using an index, "
+                f"e.g. {name_tok.lexeme}[1] <- value.",
             )
-        self._advance()  # consume ']'
-        return ast.ArrayLiteral(elements, open_tok.line)
+        value = self._expression()
+        return ast.Assignment(target, value, name_tok.line)
 
     # ---- expressions (precedence climbing) -----------------------------
     #
@@ -647,8 +608,8 @@ class Parser:
         if tok.type == TokenType.LBRACKET:
             raise PseudocodeError(
                 tok.line,
-                "A list such as [1, 2, 3] can only be used on its own to fill a whole array, "
-                "e.g. MyArray <- [1, 2, 3].",
+                "A list such as [1, 2, 3] isn't supported. To keep several values, declare an "
+                "array and use its elements one at a time through an index, e.g. MyArray[1].",
             )
 
         raise PseudocodeError(

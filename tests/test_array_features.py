@@ -1,15 +1,16 @@
 """
 Tests for the array work:
 
-  * Whole-array fill from a list:  MyArray <- ["Cat", "Dog", "Rayan"]
-    (a list of rows, [[1, 2], [3, 4]], for a 2D array).
+  * Whole-array operations are refused, with guidance. A list cannot be
+    assigned (MyArray <- [1, 2, 3]) and a whole array cannot be output
+    (OUTPUT MyArray): arrays are filled and shown one element at a time,
+    through an index.
   * Array bug fixes: an unbounded DECLARE can no longer exhaust memory; error
     messages name the element ('a[2]'), read "an INTEGER", and explain how to
-    fill or index an array; CASE OF an array element explains itself.
+    index an array; CASE OF an array element explains itself.
 """
 
 import os
-import random
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -35,11 +36,6 @@ def error_of(src: str, inputs=None) -> PseudocodeError:
     return info.value
 
 
-def values_of(interp, name):
-    """An array's contents as {index tuple: value}."""
-    return dict(interp.symbols[name].value)
-
-
 # ---- LENGTH measures strings only ----------------------------------------
 # (LENGTH(array) was tried and deliberately removed: the language's LENGTH
 # function is defined for strings, so an array is not a valid argument.)
@@ -50,7 +46,7 @@ def test_length_of_a_string_and_string_variable_still_work():
 
 
 def test_length_of_a_string_element_is_the_strings_length():
-    src = 'DECLARE n : ARRAY[1:2] OF STRING\nn <- ["Cat", "Rayan"]\nOUTPUT LENGTH(n[2])'
+    src = 'DECLARE n : ARRAY[1:2] OF STRING\nn[1] <- "Cat"\nn[2] <- "Rayan"\nOUTPUT LENGTH(n[2])'
     assert run_src(src)[0] == ["5"]
 
 
@@ -67,205 +63,107 @@ def test_length_does_not_accept_a_whole_array(declaration):
     assert "'a' is an array" in err.message
 
 
-# ---- filling an array from a list ---------------------------------------
+# ---- assigning a list to an array is refused ------------------------------
+# "MyArray <- [1, 2, 3]" is not part of the language. It is reported while the
+# program is being read (before anything runs), and says how to do it instead.
 
-def test_fill_a_string_array_in_one_line():
-    src = (
-        "DECLARE MyArray : ARRAY[1:5] OF STRING\n"
-        'MyArray <- ["Cat", "Dog", "Shourov", "Liyana", "Rayan"]\n'
-        "OUTPUT MyArray"
+def list_error(name):
+    return (
+        f"A list of values can't be assigned to '{name}' in one step. "
+        f"An array is filled one element at a time using an index, e.g. {name}[1] <- value."
     )
-    output, interp = run_src(src)
-    assert output == ["Cat", "Dog", "Shourov", "Liyana", "Rayan"]
-    assert values_of(interp, "MyArray") == {
-        (1,): "Cat", (2,): "Dog", (3,): "Shourov", (4,): "Liyana", (5,): "Rayan",
-    }
-
-
-def test_filled_elements_can_be_read_individually():
-    src = 'DECLARE a : ARRAY[1:3] OF STRING\na <- ["x", "y", "z"]\nOUTPUT a[1], a[2], a[3]'
-    assert run_src(src)[0] == ["xyz"]
-
-
-def test_list_values_may_be_expressions():
-    src = (
-        "DECLARE a : ARRAY[1:3] OF INTEGER\nDECLARE x : INTEGER\n"
-        'x <- 4\na <- [x * 2, x + 1, LENGTH("abc")]\nOUTPUT a'
-    )
-    assert run_src(src)[0] == ["8", "5", "3"]
-
-
-def test_fill_follows_the_arrays_own_bounds():
-    output, _ = run_src("DECLARE a : ARRAY[-1:1] OF INTEGER\na <- [5, 6, 7]\nOUTPUT a[-1], a[0], a[1]")
-    assert output == ["567"]
-
-
-def test_real_array_widens_integer_values():
-    _, interp = run_src("DECLARE r : ARRAY[1:2] OF REAL\nr <- [1, 2.5]")
-    values = values_of(interp, "r")
-    assert values == {(1,): 1.0, (2,): 2.5}
-    assert isinstance(values[(1,)], float)
-
-
-def test_integer_array_narrows_a_real_value_like_a_single_element_assignment_does():
-    _, interp = run_src("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [7 / 2, 2.9]")
-    assert values_of(interp, "a") == {(1,): 3, (2,): 2}
-
-
-def test_boolean_and_char_arrays():
-    output, _ = run_src(
-        "DECLARE b : ARRAY[1:2] OF BOOLEAN\nDECLARE c : ARRAY[1:2] OF CHAR\n"
-        "b <- [TRUE, 1 > 2]\nc <- ['a', 'b']\nOUTPUT b\nOUTPUT c"
-    )
-    assert output == ["TRUE", "FALSE", "a", "b"]
-
-
-def test_list_may_span_lines_and_contain_comments():
-    src = 'DECLARE n : ARRAY[1:3] OF STRING\nn <- [\n  "a", // first\n  "b",\n  "c"\n]\nOUTPUT n'
-    assert run_src(src)[0] == ["a", "b", "c"]
-
-
-def test_refilling_replaces_every_element():
-    _, interp = run_src("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [1, 2]\na <- [3, 4]")
-    assert values_of(interp, "a") == {(1,): 3, (2,): 4}
-
-
-def test_values_are_all_worked_out_before_any_is_stored():
-    # If elements were stored one by one, this would not reverse the array.
-    src = "DECLARE a : ARRAY[1:3] OF INTEGER\na <- [1, 2, 3]\na <- [a[3], a[2], a[1]]\nOUTPUT a"
-    assert run_src(src)[0] == ["3", "2", "1"]
-
-
-def test_fill_works_inside_control_structures():
-    src = (
-        "DECLARE a : ARRAY[1:2] OF INTEGER\nDECLARE i : INTEGER\n"
-        "FOR i <- 1 TO 2\n  IF i = 2 THEN\n    a <- [i, i]\n  ENDIF\nNEXT i\nOUTPUT a"
-    )
-    assert run_src(src)[0] == ["2", "2"]
-
-
-def test_fill_a_2d_array_with_a_list_of_rows():
-    src = "DECLARE g : ARRAY[1:2, 1:3] OF INTEGER\ng <- [[1, 2, 3], [4, 5, 6]]\nOUTPUT g[2, 1], g[1, 3]\nOUTPUT g"
-    output, _ = run_src(src)
-    assert output == ["43", "1", "2", "3", "4", "5", "6"]
-
-
-def test_2d_fill_respects_non_default_bounds():
-    _, interp = run_src("DECLARE g : ARRAY[0:1, 5:6] OF INTEGER\ng <- [[1, 2], [3, 4]]")
-    assert values_of(interp, "g") == {(0, 5): 1, (0, 6): 2, (1, 5): 3, (1, 6): 4}
-
-
-# ---- a bad list is refused, with a clear message, and changes nothing ------
-
-def test_too_few_values_is_reported_with_both_counts():
-    err = error_of('DECLARE a : ARRAY[1:5] OF STRING\na <- ["x", "y"]')
-    assert err.line == 2
-    assert "'a' holds 5 elements (1 to 5), but the list has 2." in err.message
-
-
-def test_too_many_values_is_reported():
-    err = error_of('DECLARE a : ARRAY[1:2] OF STRING\na <- ["x", "y", "z"]')
-    assert "holds 2 elements" in err.message and "the list has 3" in err.message
-
-
-def test_empty_list_does_not_fill_an_array():
-    assert "the list has 0" in error_of("DECLARE a : ARRAY[1:2] OF INTEGER\na <- []").message
-
-
-def test_single_element_array_message_is_grammatical():
-    assert "holds 1 element (1 to 1)" in error_of("DECLARE a : ARRAY[1:1] OF INTEGER\na <- [1, 2]").message
-
-
-def test_wrong_element_type_names_the_offending_element():
-    err = error_of('DECLARE a : ARRAY[1:3] OF INTEGER\na <- [1, 2, "three"]')
-    assert "'a[3]'" in err.message and "declared as INTEGER" in err.message
-
-
-def test_a_bad_list_leaves_the_array_exactly_as_it_was():
-    src = 'DECLARE a : ARRAY[1:3] OF INTEGER\na <- [1, 2, 3]\na <- [9, 9, "x"]'
-    program = parse(tokenize(src))
-    interp = Interpreter()
-    with pytest.raises(PseudocodeError):
-        interp.run(program)
-    assert values_of(interp, "a") == {(1,): 1, (2,): 2, (3,): 3}
-
-
-def test_a_runtime_error_inside_the_list_leaves_the_array_unchanged():
-    src = "DECLARE a : ARRAY[1:3] OF INTEGER\na <- [1, 2, 3]\na <- [7, 8, 5 / 0]"
-    interp = Interpreter()
-    with pytest.raises(PseudocodeError):
-        interp.run(parse(tokenize(src)))
-    assert values_of(interp, "a") == {(1,): 1, (2,): 2, (3,): 3}
-
-
-def test_a_wrong_count_leaves_the_array_unchanged():
-    src = "DECLARE a : ARRAY[1:3] OF INTEGER\na <- [1, 2, 3]\na <- [7, 8]"
-    interp = Interpreter()
-    with pytest.raises(PseudocodeError):
-        interp.run(parse(tokenize(src)))
-    assert values_of(interp, "a") == {(1,): 1, (2,): 2, (3,): 3}
 
 
 @pytest.mark.parametrize(
-    "src, fragment",
+    "src, name, line",
     [
-        ("DECLARE x : INTEGER\nx <- [1, 2]", "'x' is not an array"),
-        ("q <- [1, 2]", "never declared"),
-        ("CONSTANT c <- 5\nc <- [1]", "'c' is not an array"),
-        ("DECLARE a : ARRAY[1:3] OF INTEGER\na[1] <- [1, 2]", "not the single element"),
-        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [[1], [2]]", "1D array, so its list can't contain another list"),
-        ("DECLARE g : ARRAY[1:2, 1:2] OF INTEGER\ng <- [1, 2, 3, 4]", "needs one inner list per row"),
-        ("DECLARE g : ARRAY[1:2, 1:2] OF INTEGER\ng <- [[1, 2]]", "'g' has 2 rows (1 to 2), but the list has 1 inner list."),
-        ("DECLARE g : ARRAY[1:2, 1:3] OF INTEGER\ng <- [[1, 2, 3], [4, 5]]", "Row 2 of the list has 2 values, but 'g' has 3 columns"),
-        ("DECLARE g : ARRAY[1:2, 1:2] OF INTEGER\ng <- [[[1]]]", "nested two levels deep"),
-        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [1, 2", "missing its closing ']'"),
-        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [1 2]", "Expected ',' or ']'"),
-        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [1, 2,]", "Expected a value"),
+        ('DECLARE MyArray : ARRAY[1:3] OF STRING\nMyArray <- ["Cat", "Dog", "Shourov"]', "MyArray", 2),
+        ("MyArray <- [1, 2, 3]", "MyArray", 1),
+        ("DECLARE Grid : ARRAY[1:2, 1:2] OF INTEGER\nGrid <- [[1, 2], [3, 4]]", "Grid", 2),
+        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- []", "a", 2),
+        ("DECLARE a : ARRAY[1:2] OF INTEGER\na <- [\n  1,\n  2\n]", "a", 2),
+        ("DECLARE a : ARRAY[1:3] OF INTEGER\na[1] <- [1, 2]", "a", 2),
+        ("DECLARE x : INTEGER\nx <- [1]", "x", 2),
+        ("DECLARE a : ARRAY[1:2] OF INTEGER\nOUTPUT 1\nIF TRUE THEN\n  a <- [1, 2]\nENDIF", "a", 4),
     ],
 )
-def test_misuse_of_lists_gets_a_clear_error(src, fragment):
-    assert fragment in error_of(src).message
+def test_assigning_a_list_is_an_error_that_explains_how_to_fill_an_array(src, name, line):
+    with pytest.raises(PseudocodeError) as info:
+        parse(tokenize(src))  # a syntax error: found before the program runs
+    assert info.value.line == line
+    assert info.value.message == list_error(name)
+
+
+def test_a_list_error_stops_the_program_before_anything_runs():
+    printed = []
+    with pytest.raises(PseudocodeError):
+        Interpreter(output_fn=printed.append).run(parse(tokenize('OUTPUT "hello"\nMyArray <- [1]')))
+    assert printed == []
 
 
 @pytest.mark.parametrize(
     "src",
     [
         "OUTPUT [1, 2]",
-        "DECLARE a : ARRAY[1:2] OF INTEGER\nOUTPUT [1, 2] + 1",
-        "CONSTANT c <- [1, 2]",
         "DECLARE x : INTEGER\nx <- 5 + [1]",
+        "CONSTANT c <- [1, 2]",
         "DECLARE a : ARRAY[1:2] OF INTEGER\nIF [1] = 1 THEN\n  OUTPUT 1\nENDIF",
     ],
 )
-def test_a_list_anywhere_but_a_whole_array_assignment_explains_what_it_is_for(src):
+def test_a_list_anywhere_else_says_lists_are_not_supported(src):
     err = error_of(src)
-    assert "can only be used on its own to fill a whole array" in err.message
+    assert "A list such as [1, 2, 3] isn't supported" in err.message
+    assert "MyArray[1]" in err.message
 
 
-def test_assigning_a_plain_value_to_a_whole_array_explains_both_options():
+def test_indexing_syntax_is_unaffected_by_the_list_error():
+    # '[' after a name is an index, as ever; only a '[' that starts a VALUE is refused.
+    output, _ = run_src(
+        "DECLARE a : ARRAY[1:2] OF INTEGER\nDECLARE g : ARRAY[1:2, 1:2] OF INTEGER\n"
+        "a[1] <- 5\ng[2, 1] <- a[1] + 1\nOUTPUT a[1], g[2, 1]"
+    )
+    assert output == ["56"]
+
+
+# ---- assigning or outputting a whole array is refused -----------------------
+
+def test_assigning_a_plain_value_to_a_whole_array_explains_how_to_assign_elements():
     err = error_of("DECLARE a : ARRAY[1:2] OF INTEGER\na <- 5")
-    assert "a[1] <- value" in err.message and "a <- [value1, value2, ...]" in err.message
+    assert err.line == 2
+    assert err.message == (
+        "'a' is an array, so it can't be assigned as a whole. "
+        "Assign each element separately using its index, e.g. a[1] <- value."
+    )
 
 
-def test_a_list_can_be_randomly_generated_and_always_matches_element_by_element_assignment():
-    rng = random.Random(4242)
-    literals = {
-        "INTEGER": lambda: str(rng.randint(-50, 50)),
-        "REAL": lambda: rng.choice([str(rng.randint(-9, 9)), f"{rng.randint(-9, 9)}.{rng.randint(0, 99)}"]),
-        "STRING": lambda: '"' + "".join(rng.choice("abcxyz ") for _ in range(rng.randint(0, 6))) + '"',
-        "BOOLEAN": lambda: rng.choice(["TRUE", "FALSE"]),
-    }
-    for _ in range(300):
-        element_type = rng.choice(list(literals))
-        low = rng.randint(-3, 3)
-        size = rng.randint(1, 8)
-        items = [literals[element_type]() for _ in range(size)]
-        decl = f"DECLARE a : ARRAY[{low}:{low + size - 1}] OF {element_type}\n"
-        by_list = decl + "a <- [" + ", ".join(items) + "]\n"
-        by_element = decl + "".join(f"a[{low + k}] <- {v}\n" for k, v in enumerate(items))
-        _, via_list = run_src(by_list)
-        _, via_elements = run_src(by_element)
-        assert values_of(via_list, "a") == values_of(via_elements, "a"), by_list
+def test_copying_one_array_into_another_is_still_refused():
+    err = error_of("DECLARE a, b : ARRAY[1:2] OF INTEGER\nb <- a")
+    assert err.line == 2
+    assert "'b' is an array, so it can't be assigned as a whole" in err.message  # the target is checked first
+
+
+def test_reading_a_whole_array_into_a_variable_is_still_refused():
+    err = error_of("DECLARE a : ARRAY[1:2] OF INTEGER\nDECLARE x : INTEGER\nx <- a")
+    assert err.message == "'a' is an array — use an index, e.g. a[1], to access an element."
+
+
+@pytest.mark.parametrize("statement", ["OUTPUT a", 'OUTPUT "x", a', 'OUTPUT a, "x"'])
+def test_outputting_a_whole_array_explains_how_to_output_elements(statement):
+    err = error_of(f"DECLARE a : ARRAY[1:2] OF INTEGER\n{statement}")
+    assert err.line == 2
+    assert err.message == (
+        "'a' is an array, so it can't be output as a whole. "
+        "Output each element separately using its index, e.g. OUTPUT a[1]."
+    )
+
+
+def test_the_recommended_way_fills_and_shows_an_array_element_by_element():
+    src = (
+        "DECLARE MyArray : ARRAY[1:3] OF STRING\nDECLARE i : INTEGER\n"
+        'MyArray[1] <- "Cat"\nMyArray[2] <- "Dog"\nMyArray[3] <- "Shourov"\n'
+        "FOR i <- 1 TO 3\n  OUTPUT i, \": \", MyArray[i]\nNEXT i"
+    )
+    assert run_src(src)[0] == ["1: Cat", "2: Dog", "3: Shourov"]
 
 
 # ---- array bug fixes ----------------------------------------------------

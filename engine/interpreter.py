@@ -11,10 +11,7 @@ Implements:
     FR-3.4        Undeclared-identifier and type-mismatch errors
     FR-4.1        INPUT reads a value from the user (or, extended on
                   request, directly into an array element)
-    FR-4.2        OUTPUT displays one or more values (or, extended on
-                  request, every element of a bare array, one per line)
-    (extension)   MyArray <- [v1, v2, ...] fills a whole array in one
-                  statement ([[...], [...]] for a 2D array)
+    FR-4.2        OUTPUT displays one or more values
     FR-5.1        Arithmetic operators (+ - * / ^)
     FR-5.4        Relational operators (= < <= > >= <>)
     FR-7.1        IF ... THEN ... ENDIF (no ELSE)
@@ -325,14 +322,11 @@ class Interpreter:
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
             )
-        if isinstance(stmt.value, ast.ArrayLiteral):
-            self._exec_array_fill(stmt, symbol)
-            return
         if symbol.is_array:
             raise PseudocodeError(
                 stmt.line,
-                f"'{name}' is an array. Assign one element with {name}[1] <- value, or fill "
-                f"the whole array from a list: {name} <- [value1, value2, ...].",
+                f"'{name}' is an array, so it can't be assigned as a whole. Assign each "
+                f"element separately using its index, e.g. {name}[1] <- value.",
             )
         if symbol.is_constant:
             raise PseudocodeError(
@@ -341,81 +335,6 @@ class Interpreter:
             )
         value = self._eval(stmt.value)
         self._store(symbol, value, stmt.line, name)
-
-    def _exec_array_fill(self, stmt: ast.Assignment, symbol):
-        """<array> <- [v1, v2, ...]   (a list of rows, [[...], [...]], for 2D).
-
-        The list must hold exactly one value per element, and every value must
-        suit the array's element type, exactly as for a single-element
-        assignment. Nothing is stored unless the WHOLE list is valid, so a bad
-        value halfway through never leaves the array half-filled; and because
-        every value is worked out before any is stored,
-        `A <- [A[3], A[2], A[1]]` reverses A correctly."""
-        name = stmt.target.name
-        literal = stmt.value
-        if not symbol.is_array:
-            raise PseudocodeError(
-                stmt.line,
-                f"'{name}' is not an array, so it can't be filled from a list of values. "
-                f"Declare it with ARRAY[...] first.",
-            )
-
-        cells = []  # (index tuple, expression node) in reading order
-        dimensions = symbol.dimensions
-        if len(dimensions) == 1:
-            (lo, hi) = dimensions[0]
-            size = hi - lo + 1
-            elements = literal.elements
-            if len(elements) != size:
-                raise PseudocodeError(
-                    stmt.line,
-                    f"'{name}' holds {size} element{'s' if size != 1 else ''} ({lo} to {hi}), "
-                    f"but the list has {len(elements)}. The list needs exactly one value "
-                    f"for each element.",
-                )
-            for offset, element in enumerate(elements):
-                if isinstance(element, ast.ArrayLiteral):
-                    raise PseudocodeError(
-                        element.line,
-                        f"'{name}' is a 1D array, so its list can't contain another list. "
-                        f"(A list of lists fills a 2D array.)",
-                    )
-                cells.append(((lo + offset,), element))
-        else:
-            (r_lo, r_hi), (c_lo, c_hi) = dimensions
-            rows, columns = r_hi - r_lo + 1, c_hi - c_lo + 1
-            row_lists = literal.elements
-            for row in row_lists:
-                if not isinstance(row, ast.ArrayLiteral):
-                    raise PseudocodeError(
-                        getattr(row, "line", stmt.line),
-                        f"'{name}' is a 2D array, so its list needs one inner list per row, "
-                        f"like [[1, 2], [3, 4]].",
-                    )
-            if len(row_lists) != rows:
-                raise PseudocodeError(
-                    stmt.line,
-                    f"'{name}' has {rows} row{'s' if rows != 1 else ''} ({r_lo} to {r_hi}), "
-                    f"but the list has {len(row_lists)} inner list{'s' if len(row_lists) != 1 else ''}.",
-                )
-            for row_offset, row in enumerate(row_lists):
-                if len(row.elements) != columns:
-                    raise PseudocodeError(
-                        row.line,
-                        f"Row {r_lo + row_offset} of the list has {len(row.elements)} value"
-                        f"{'s' if len(row.elements) != 1 else ''}, but '{name}' has {columns} "
-                        f"column{'s' if columns != 1 else ''} ({c_lo} to {c_hi}).",
-                    )
-                for column_offset, element in enumerate(row.elements):
-                    cells.append(((r_lo + row_offset, c_lo + column_offset), element))
-
-        new_values = {}
-        for index_tuple, element in cells:
-            value = self._eval(element)
-            new_values[index_tuple] = self._coerce_for_type(
-                symbol.data_type, value, element.line, self._element_label(name, index_tuple)
-            )
-        symbol.value.update(new_values)
 
     @staticmethod
     def _element_label(name, index_tuple):
@@ -521,44 +440,22 @@ class Interpreter:
         symbol.value[index_tuple] = value
 
     def _exec_output(self, stmt):
-        # OUTPUT <array> (no index) prints every element on its own line,
-        # rather than being joined into the usual single OUTPUT line — an
-        # extension of FR-4.2, added on request. OUTPUT <array>[i] is an
-        # ordinary element read and is untouched; only a *bare* array
-        # identifier triggers this. Anything else builds up one line as
-        # before, joining comma-separated values with no separator.
-        pending = []
+        # FR-4.2: comma-separated values are joined, with no separator, into one
+        # line. A whole array cannot be output in one go; its elements are
+        # output one at a time through an index, e.g. OUTPUT MyArray[1].
+        parts = []
         for value_node in stmt.values:
-            array_symbol = self._array_symbol_for_bare_output(value_node)
-            if array_symbol is not None:
-                if pending:
-                    self._output_fn("".join(pending))
-                    pending = []
-                for index_tuple in self._array_indices_in_order(array_symbol):
-                    self._output_fn(self._format_value(array_symbol.value[index_tuple]))
-                continue
-            pending.append(self._format_value(self._eval(value_node)))
-        if pending:
-            self._output_fn("".join(pending))
-
-    def _array_symbol_for_bare_output(self, value_node):
-        if not isinstance(value_node, ast.Identifier):
-            return None
-        symbol = self.symbols.get(value_node.name)
-        return symbol if (symbol is not None and symbol.is_array) else None
-
-    def _array_indices_in_order(self, symbol):
-        """Every valid index tuple for an array, in natural reading order
-        (1D: sequential; 2D: row-major)."""
-        if len(symbol.dimensions) == 1:
-            (lo, hi) = symbol.dimensions[0]
-            for i in range(lo, hi + 1):
-                yield (i,)
-        else:
-            (r_lo, r_hi), (c_lo, c_hi) = symbol.dimensions
-            for r in range(r_lo, r_hi + 1):
-                for c in range(c_lo, c_hi + 1):
-                    yield (r, c)
+            if isinstance(value_node, ast.Identifier):
+                symbol = self.symbols.get(value_node.name)
+                if symbol is not None and symbol.is_array:
+                    raise PseudocodeError(
+                        stmt.line,
+                        f"'{value_node.name}' is an array, so it can't be output as a whole. "
+                        f"Output each element separately using its index, "
+                        f"e.g. OUTPUT {value_node.name}[1].",
+                    )
+            parts.append(self._format_value(self._eval(value_node)))
+        self._output_fn("".join(parts))
 
     def _exec_for(self, stmt: ast.ForLoop):
         start = self._eval(stmt.start)
@@ -942,15 +839,6 @@ class Interpreter:
             )
         return text[start - 1 : start - 1 + length]
 
-    def _eval_array_literal(self, node: ast.ArrayLiteral):
-        # The parser only produces an ArrayLiteral as the value of a whole-array
-        # assignment (handled by _exec_array_fill), so this is a safety net.
-        raise PseudocodeError(
-            node.line,
-            "A list such as [1, 2, 3] can only be used to fill a whole array, "
-            "e.g. MyArray <- [1, 2, 3].",
-        )
-
     def _eval_index(self, node: ast.Index):
         """<identifier>[<index>...]   (array element read; the write side
         is _exec_array_assignment)."""
@@ -1066,7 +954,6 @@ Interpreter._EXPR_HANDLERS = {
     ast.BinaryOp: Interpreter._eval_binary,
     ast.Call: Interpreter._eval_call,
     ast.Index: Interpreter._eval_index,
-    ast.ArrayLiteral: Interpreter._eval_array_literal,
 }
 
 Interpreter._BUILTIN_HANDLERS = {
