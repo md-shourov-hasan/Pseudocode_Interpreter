@@ -24,6 +24,9 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     repeat_stmt    := REPEAT block UNTIL expression                         -- FR-6.4
     while_stmt     := WHILE expression DO block ENDWHILE                    -- FR-6.5
     assignment_stmt:= ( IDENTIFIER | IDENTIFIER '[' arglist ']' ) ASSIGN expression  -- FR-8.2, FR-8.4
+                    | IDENTIFIER ASSIGN array_literal                                -- fill a whole array
+    array_literal  := '[' [ element ( ',' element )* ] ']'      (newlines allowed inside)
+    element        := expression | array_literal                (nested only for 2D arrays)
     data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
 
     expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
@@ -429,6 +432,16 @@ class Parser:
         line = self._advance().line  # consume CASE
         self._expect(TokenType.OF, "Expected OF after CASE")
         subject_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after CASE OF")
+        if self._check(TokenType.LBRACKET):
+            # CASE OF takes a plain variable (FR-7.3). Without this check the
+            # '[' is read as the start of a branch value, which points the
+            # student at the wrong place.
+            raise PseudocodeError(
+                subject_tok.line,
+                f"CASE OF needs a plain variable, but '{subject_tok.lexeme}[...]' is an array "
+                f"element. Copy it into a variable first (for example Choice <- "
+                f"{subject_tok.lexeme}[1]) and use CASE OF Choice.",
+            )
 
         branches = []
         otherwise_stmt = None
@@ -483,8 +496,53 @@ class Parser:
         else:
             target = ast.Identifier(name_tok.lexeme, name_tok.line)
         self._expect(TokenType.ASSIGN, "Expected '<-' to assign a value")
-        value = self._expression()
+        if self._check(TokenType.LBRACKET):
+            # MyArray <- [v1, v2, ...]: fills a whole array. Only a bare
+            # identifier can take a list; the interpreter checks that it names
+            # an array of the right shape.
+            if isinstance(target, ast.Index):
+                raise PseudocodeError(
+                    self._peek().line,
+                    f"A list of values can only fill a whole array, not the single element "
+                    f"'{name_tok.lexeme}[...]'. Assign one value, or leave off the index.",
+                )
+            value = self._array_literal(depth=1)
+        else:
+            value = self._expression()
         return ast.Assignment(target, value, name_tok.line)
+
+    def _array_literal(self, depth: int):
+        """[v1, v2, ...] or, for a 2D array, [[...], [...]]. The list may span
+        several lines. `depth` is 1 for the outer list, 2 for a row list."""
+        open_tok = self._advance()  # consume '['
+        elements = []
+        self._skip_newlines()
+        if not self._check(TokenType.RBRACKET):
+            while True:
+                if self._check(TokenType.LBRACKET):
+                    if depth >= 2:
+                        raise PseudocodeError(
+                            self._peek().line,
+                            "Lists can only be nested two levels deep (a list of rows, "
+                            "for a 2D array).",
+                        )
+                    elements.append(self._array_literal(depth + 1))
+                else:
+                    elements.append(self._expression())
+                self._skip_newlines()
+                if not self._match(TokenType.COMMA):
+                    break
+                self._skip_newlines()
+        if not self._check(TokenType.RBRACKET):
+            found = self._peek()
+            if found.type == TokenType.EOF:
+                raise PseudocodeError(open_tok.line, "This list is missing its closing ']'.")
+            raise PseudocodeError(
+                found.line,
+                f"Expected ',' or ']' in this list of values, but found {describe_token(found)}.",
+            )
+        self._advance()  # consume ']'
+        return ast.ArrayLiteral(elements, open_tok.line)
 
     # ---- expressions (precedence climbing) -----------------------------
     #
@@ -585,6 +643,13 @@ class Parser:
             if self._check(TokenType.LBRACKET):
                 return self._finish_index(tok)
             return ast.Identifier(tok.lexeme, tok.line)
+
+        if tok.type == TokenType.LBRACKET:
+            raise PseudocodeError(
+                tok.line,
+                "A list such as [1, 2, 3] can only be used on its own to fill a whole array, "
+                "e.g. MyArray <- [1, 2, 3].",
+            )
 
         raise PseudocodeError(
             tok.line,

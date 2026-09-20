@@ -9,7 +9,9 @@ Node coverage: Program, Declare, ArrayDeclare, Constant, Input, Output,
 If, Case, Assignment, ForLoop, RepeatLoop, WhileLoop (statements —
 added across Milestones 2, 5, 6, 7), and Literal, Identifier, UnaryOp,
 BinaryOp, Call, Index (expressions — added in Milestone 2; Index is
-also used as an Assignment target as of Milestone 7).
+also used as an Assignment target as of Milestone 7), plus ArrayLiteral
+(the [v1, v2, ...] list that fills a whole array; only ever the value of
+an Assignment).
 
 Call and Index are parsed now (they're pure syntax: `name(...)` /
 `name[...]`) but not yet given meaning — built-in functions arrive in
@@ -194,4 +196,18 @@ class Index:
     """name[idx1] or name[idx1, idx2] — 1D/2D array element access."""
     name: str
     indices: list
+    line: int
+
+
+@dataclass
+class ArrayLiteral:
+    """[value, value, ...] — a list of values that fills a whole array in one
+    assignment:  MyArray <- ["Cat", "Dog", "Rayan"].
+
+    `elements` holds expression nodes. For a 2D array each element is itself an
+    ArrayLiteral (one per row): Grid <- [[1, 2], [3, 4]]. An ArrayLiteral is
+    only ever the `value` of an Assignment whose target is a whole array; the
+    interpreter checks it against the array's declared shape and element type.
+    """
+    elements: list
     line: int
