@@ -13,6 +13,8 @@ Implements:
                   request, directly into an array element)
     FR-4.2        OUTPUT displays one or more values (or, extended on
                   request, every element of a bare array, one per line)
+    (extension)   MyArray <- [v1, v2, ...] fills a whole array in one
+                  statement ([[...], [...]] for a 2D array)
     FR-5.1        Arithmetic operators (+ - * / ^)
     FR-5.4        Relational operators (= < <= > >= <>)
     FR-7.1        IF ... THEN ... ENDIF (no ELSE)
@@ -129,6 +131,19 @@ _PYTHON_TYPES_FOR = {
 }
 
 
+# Every array element is stored explicitly (about 130 bytes each), so an
+# unbounded DECLARE such as ARRAY[1:100000000] would exhaust the machine's
+# memory before the execution time limit could ever stop it. IGCSE programs use
+# arrays of a few dozen elements; this is a generous ceiling for one program,
+# counted across all of its arrays.
+MAX_ARRAY_ELEMENTS = 1_000_000
+
+
+def _with_article(type_name: str) -> str:
+    """'an INTEGER', 'a REAL' -- so messages never say 'a INTEGER'."""
+    return f"an {type_name}" if type_name[:1] in "AEIOU" else f"a {type_name}"
+
+
 class Symbol:
     __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions")
 
@@ -156,6 +171,7 @@ class Interpreter:
         self._input_fn = input_fn if input_fn is not None else input
         self._output_fn = output_fn if output_fn is not None else self.output.append
         self._current_line = 0
+        self._array_elements = 0  # elements allocated so far, across all arrays
         self._max_execution_seconds = max_execution_seconds
         self._execution_started_at = None
         if max_execution_seconds is not None:
@@ -229,8 +245,8 @@ class Interpreter:
         for lower_node, upper_node in stmt.dimensions:
             lower = self._eval(lower_node)
             upper = self._eval(upper_node)
-            lower = self._expect_integer("An array bound", lower, stmt.line, "lower bound")
-            upper = self._expect_integer("An array bound", upper, stmt.line, "upper bound")
+            lower = self._expect_integer(None, lower, stmt.line, "An array's lower bound")
+            upper = self._expect_integer(None, upper, stmt.line, "An array's upper bound")
             if lower > upper:
                 raise PseudocodeError(
                     stmt.line,
@@ -243,6 +259,24 @@ class Interpreter:
             if name in self.symbols or name in seen_in_statement:
                 raise PseudocodeError(stmt.line, f"'{name}' has already been declared.")
             seen_in_statement.add(name)
+
+        # Refuse an array that would not fit in memory BEFORE allocating any of it.
+        per_array = 1
+        for lower, upper in dimensions:
+            per_array *= upper - lower + 1
+        requested = per_array * len(stmt.identifiers)
+        if self._array_elements + requested > MAX_ARRAY_ELEMENTS:
+            raise PseudocodeError(
+                stmt.line,
+                f"This DECLARE would create {requested:,} array elements"
+                + (
+                    f", bringing the program's total to {self._array_elements + requested:,}"
+                    if self._array_elements
+                    else ""
+                )
+                + f", but a program can hold at most {MAX_ARRAY_ELEMENTS:,} array elements.",
+            )
+        self._array_elements += requested
 
         default = _DEFAULT_VALUE[stmt.element_type]
         for name in stmt.identifiers:
@@ -291,7 +325,15 @@ class Interpreter:
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
             )
-        self._ensure_scalar(symbol, name, stmt.line)
+        if isinstance(stmt.value, ast.ArrayLiteral):
+            self._exec_array_fill(stmt, symbol)
+            return
+        if symbol.is_array:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is an array. Assign one element with {name}[1] <- value, or fill "
+                f"the whole array from a list: {name} <- [value1, value2, ...].",
+            )
         if symbol.is_constant:
             raise PseudocodeError(
                 stmt.line,
@@ -300,12 +342,94 @@ class Interpreter:
         value = self._eval(stmt.value)
         self._store(symbol, value, stmt.line, name)
 
+    def _exec_array_fill(self, stmt: ast.Assignment, symbol):
+        """<array> <- [v1, v2, ...]   (a list of rows, [[...], [...]], for 2D).
+
+        The list must hold exactly one value per element, and every value must
+        suit the array's element type, exactly as for a single-element
+        assignment. Nothing is stored unless the WHOLE list is valid, so a bad
+        value halfway through never leaves the array half-filled; and because
+        every value is worked out before any is stored,
+        `A <- [A[3], A[2], A[1]]` reverses A correctly."""
+        name = stmt.target.name
+        literal = stmt.value
+        if not symbol.is_array:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is not an array, so it can't be filled from a list of values. "
+                f"Declare it with ARRAY[...] first.",
+            )
+
+        cells = []  # (index tuple, expression node) in reading order
+        dimensions = symbol.dimensions
+        if len(dimensions) == 1:
+            (lo, hi) = dimensions[0]
+            size = hi - lo + 1
+            elements = literal.elements
+            if len(elements) != size:
+                raise PseudocodeError(
+                    stmt.line,
+                    f"'{name}' holds {size} element{'s' if size != 1 else ''} ({lo} to {hi}), "
+                    f"but the list has {len(elements)}. The list needs exactly one value "
+                    f"for each element.",
+                )
+            for offset, element in enumerate(elements):
+                if isinstance(element, ast.ArrayLiteral):
+                    raise PseudocodeError(
+                        element.line,
+                        f"'{name}' is a 1D array, so its list can't contain another list. "
+                        f"(A list of lists fills a 2D array.)",
+                    )
+                cells.append(((lo + offset,), element))
+        else:
+            (r_lo, r_hi), (c_lo, c_hi) = dimensions
+            rows, columns = r_hi - r_lo + 1, c_hi - c_lo + 1
+            row_lists = literal.elements
+            for row in row_lists:
+                if not isinstance(row, ast.ArrayLiteral):
+                    raise PseudocodeError(
+                        getattr(row, "line", stmt.line),
+                        f"'{name}' is a 2D array, so its list needs one inner list per row, "
+                        f"like [[1, 2], [3, 4]].",
+                    )
+            if len(row_lists) != rows:
+                raise PseudocodeError(
+                    stmt.line,
+                    f"'{name}' has {rows} row{'s' if rows != 1 else ''} ({r_lo} to {r_hi}), "
+                    f"but the list has {len(row_lists)} inner list{'s' if len(row_lists) != 1 else ''}.",
+                )
+            for row_offset, row in enumerate(row_lists):
+                if len(row.elements) != columns:
+                    raise PseudocodeError(
+                        row.line,
+                        f"Row {r_lo + row_offset} of the list has {len(row.elements)} value"
+                        f"{'s' if len(row.elements) != 1 else ''}, but '{name}' has {columns} "
+                        f"column{'s' if columns != 1 else ''} ({c_lo} to {c_hi}).",
+                    )
+                for column_offset, element in enumerate(row.elements):
+                    cells.append(((r_lo + row_offset, c_lo + column_offset), element))
+
+        new_values = {}
+        for index_tuple, element in cells:
+            value = self._eval(element)
+            new_values[index_tuple] = self._coerce_for_type(
+                symbol.data_type, value, element.line, self._element_label(name, index_tuple)
+            )
+        symbol.value.update(new_values)
+
+    @staticmethod
+    def _element_label(name, index_tuple):
+        """'a[2]' or 'g[1, 2]' -- how an array element is named in messages."""
+        return f"{name}[{', '.join(str(i) for i in index_tuple)}]"
+
     def _exec_array_assignment(self, stmt: ast.Assignment):
         """<identifier>[<index>...] <- <value>   (FR-8.2, FR-8.4)"""
         target = stmt.target
         symbol, index_tuple = self._resolve_array_element(target.name, target.indices, stmt.line)
         value = self._eval(stmt.value)
-        value = self._coerce_for_type(symbol.data_type, value, stmt.line, target.name)
+        value = self._coerce_for_type(
+            symbol.data_type, value, stmt.line, self._element_label(target.name, index_tuple)
+        )
         symbol.value[index_tuple] = value
 
     def _resolve_array_element(self, name, index_nodes, line):
@@ -329,7 +453,7 @@ class Interpreter:
         indices = []
         for index_node, (lower, upper) in zip(index_nodes, symbol.dimensions):
             index_value = self._eval(index_node)
-            index_value = self._expect_integer(f"'{name}'", index_value, line, "index")
+            index_value = self._expect_integer(None, index_value, line, f"The index for '{name}'")
             if index_value < lower or index_value > upper:
                 raise PseudocodeError(
                     line,
@@ -376,7 +500,7 @@ class Interpreter:
         except ValueError:
             raise PseudocodeError(
                 stmt.line,
-                f"Couldn't read '{raw}' as a {symbol.data_type} value for '{name}'.",
+                f"Couldn't read '{raw}' as {_with_article(symbol.data_type)} value for '{name}'.",
             )
         symbol.value = value
 
@@ -391,7 +515,8 @@ class Interpreter:
         except ValueError:
             raise PseudocodeError(
                 stmt.line,
-                f"Couldn't read '{raw}' as a {symbol.data_type} value for '{target.name}[...]'.",
+                f"Couldn't read '{raw}' as {_with_article(symbol.data_type)} value for "
+                f"'{self._element_label(target.name, index_tuple)}'.",
             )
         symbol.value[index_tuple] = value
 
@@ -699,10 +824,15 @@ class Interpreter:
         ROUND(2.4, 0)) is accepted, because "/" always yields a REAL even when
         the quotient is whole -- the same reasoning as narrowing a REAL into an
         INTEGER variable. A REAL with a fractional part (2.5) is still an
-        error, since silently truncating it here would hide a real mistake."""
+        error, since silently truncating it here would hide a real mistake.
+
+        Messages read "<name>'s <which> must be INTEGER ..."; pass name=None to
+        use `which` on its own as the whole subject ("The index for 'a' must be
+        INTEGER ...")."""
+        subject = f"{name}'s {which}" if name else which
         if isinstance(value, bool):
             raise PseudocodeError(
-                line, f"{name}'s {which} must be INTEGER, but got {self._type_name(value)}."
+                line, f"{subject} must be INTEGER, but got {self._type_name(value)}."
             )
         if isinstance(value, int):
             return value
@@ -712,11 +842,11 @@ class Interpreter:
             hint = "" if name == "ROUND" else " (DIV gives a whole-number quotient.)"
             raise PseudocodeError(
                 line,
-                f"{name}'s {which} must be INTEGER, but got the REAL value "
+                f"{subject} must be INTEGER, but got the REAL value "
                 f"{self._format_real(value)}, which is not a whole number.{hint}",
             )
         raise PseudocodeError(
-            line, f"{name}'s {which} must be INTEGER, but got {self._type_name(value)}."
+            line, f"{subject} must be INTEGER, but got {self._type_name(value)}."
         )
 
     def _expect_string(self, name, value, line, which="argument"):
@@ -812,6 +942,15 @@ class Interpreter:
             )
         return text[start - 1 : start - 1 + length]
 
+    def _eval_array_literal(self, node: ast.ArrayLiteral):
+        # The parser only produces an ArrayLiteral as the value of a whole-array
+        # assignment (handled by _exec_array_fill), so this is a safety net.
+        raise PseudocodeError(
+            node.line,
+            "A list such as [1, 2, 3] can only be used to fill a whole array, "
+            "e.g. MyArray <- [1, 2, 3].",
+        )
+
     def _eval_index(self, node: ast.Index):
         """<identifier>[<index>...]   (array element read; the write side
         is _exec_array_assignment)."""
@@ -847,12 +986,14 @@ class Interpreter:
         if data_type == "BOOLEAN" and not isinstance(value, bool):
             raise PseudocodeError(
                 line,
-                f"Can't assign a {self._type_name(value)} value to '{name}', which is declared as BOOLEAN.",
+                f"Can't assign {_with_article(self._type_name(value))} value to '{name}', "
+                f"which is declared as BOOLEAN.",
             )
         if not isinstance(value, valid_types):
             raise PseudocodeError(
                 line,
-                f"Can't assign a {self._type_name(value)} value to '{name}', which is declared as {data_type}.",
+                f"Can't assign {_with_article(self._type_name(value))} value to '{name}', "
+                f"which is declared as {data_type}.",
             )
         if data_type == "CHAR" and isinstance(value, str) and len(value) != 1:
             raise PseudocodeError(
@@ -925,6 +1066,7 @@ Interpreter._EXPR_HANDLERS = {
     ast.BinaryOp: Interpreter._eval_binary,
     ast.Call: Interpreter._eval_call,
     ast.Index: Interpreter._eval_index,
+    ast.ArrayLiteral: Interpreter._eval_array_literal,
 }
 
 Interpreter._BUILTIN_HANDLERS = {

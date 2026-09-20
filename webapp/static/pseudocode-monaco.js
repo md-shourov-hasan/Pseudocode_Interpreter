@@ -317,7 +317,9 @@ function buildCompletionEngine(lang, table) {
     for (const fn of lang.builtinFunctions) {
       if (type === "any" || RETURNS[fn] === type) out.push(keyword(fn, "3", false));
     }
-    if (type === "any") out.push(keyword("TRUE", "4"), keyword("FALSE", "4"), keyword("NOT", "1"));
+    if (type === "any" || type === "boolean") {
+      out.push(keyword("TRUE", "4"), keyword("FALSE", "4"), keyword("NOT", "1"));
+    }
     return out;
   }
 
@@ -334,7 +336,9 @@ function buildCompletionEngine(lang, table) {
         const isCall = p && p.t === "id" && BUILTINS.has(p.v);
         frames.push({ kind: isCall ? "call" : "group", name: isCall ? p.v : null, arg: 0 });
       } else if (tk.t === "[") {
-        frames.push({ kind: "index", arg: 0 });
+        const p = slice[i - 1];
+        const isIndex = p && (p.t === "id" || (p.t === "kw" && p.v === "ARRAY"));
+        frames.push({ kind: isIndex ? "index" : "list", arg: 0 });
       } else if (tk.t === "," && frames.length) {
         frames[frames.length - 1].arg += 1;
       } else if ((tk.t === ")" || tk.t === "]") && frames.length) {
@@ -345,6 +349,7 @@ function buildCompletionEngine(lang, table) {
     for (let k = frames.length - 1; k >= 0; k -= 1) {
       const f = frames[k];
       if (f.kind === "index") { type = "numeric"; break; }
+      if (f.kind === "list") { type = baseType; break; } // MyArray <- [ ...: the array's own type
       if (f.kind === "call") { type = (ARGUMENTS[f.name] || [])[f.arg] || "any"; break; }
     }
     const last = slice[slice.length - 1];
@@ -361,7 +366,9 @@ function buildCompletionEngine(lang, table) {
     if (state.expectOperand) return operandCandidates(state.type, symbols);
     const out = [];
     if (state.depth === 0) for (const word of opts.then || []) out.push(keyword(word, "0", true));
-    if (opts.logic && state.type === "any") out.push(keyword("AND", "1"), keyword("OR", "1"));
+    if (opts.logic && (state.type === "any" || state.type === "boolean")) {
+      out.push(keyword("AND", "1"), keyword("OR", "1"));
+    }
     return out;
   }
 
@@ -409,7 +416,7 @@ function buildCompletionEngine(lang, table) {
         if (tk.t === "[") depth += 1;
         else if (tk.t === "]") depth -= 1;
       }
-      if (depth > 0) return expression(after.slice(1), "numeric", {}, symbols); // inside the bounds
+      if (depth > 0) return expression(after, "numeric", {}, symbols); // inside the bounds
       return [keyword("OF", "0", true)];
     }
     return [];
@@ -434,8 +441,14 @@ function buildCompletionEngine(lang, table) {
     const first = stmt[0];
     if (first.t === "id") {
       const assign = stmt.findIndex((tk) => tk.t === "assign");
-      if (assign >= 0) return expression(stmt.slice(assign + 1), "any", { logic: true }, symbols);
-      if (stmt[1] && stmt[1].t === "[") return expression(stmt.slice(1), "numeric", {}, symbols);
+      if (assign >= 0) {
+        // MyArray <- [ ... ]: the values must suit the array's element type.
+        const target = symbols.get(first.v);
+        const filling = target && target.kind === "array" && stmt[assign + 1] && stmt[assign + 1].t === "[";
+        const base = filling ? CATEGORY[target.type] || "any" : "any";
+        return expression(stmt.slice(assign + 1), base, { logic: true }, symbols);
+      }
+      if (stmt[1] && stmt[1].t === "[") return expression(stmt, "numeric", {}, symbols);
       return []; // "<-" comes next
     }
     if (first.t !== "kw") return [];
@@ -450,7 +463,7 @@ function buildCompletionEngine(lang, table) {
         if (stmt.length === 1) {
           return [...symbols.values()].filter((s) => s.kind !== "const").map(symbolCandidate);
         }
-        return stmt[2] && stmt[2].t === "[" ? expression(stmt.slice(2), "numeric", {}, symbols) : [];
+        return stmt[2] && stmt[2].t === "[" ? expression(stmt.slice(1), "numeric", {}, symbols) : [];
       }
       case "OUTPUT": return expression(rest, "any", { logic: true }, symbols);
       case "IF": return expression(rest, "any", { then: ["THEN"], logic: true }, symbols);
@@ -480,14 +493,48 @@ function buildCompletionEngine(lang, table) {
   }
 
   // ---- public ------------------------------------------------------------
+  // A list of values ([ ... ]) may span several lines: after "[" or "," the next
+  // line still belongs to it. Returns the index of the "[" that opens a list
+  // still open at the end of `toks`, or -1. A line ending any other way ends the
+  // list as far as completion is concerned, so a forgotten "]" cannot leave the
+  // rest of the program stuck in "list" mode.
+  function openListStart(toks) {
+    let open = [];
+    for (let k = 0; k < toks.length; k += 1) {
+      const tk = toks[k];
+      if (tk.t === "[") {
+        const p = toks[k - 1];
+        const isIndex = p && (p.t === "id" || (p.t === "kw" && p.v === "ARRAY"));
+        open.push({ k, list: !isIndex });
+      } else if (tk.t === "]") {
+        open.pop();
+      } else if (tk.t === "nl") {
+        const p = toks[k - 1];
+        const continues = p && (p.t === "[" || p.t === ",");
+        open = continues ? open.filter((f) => f.list) : [];
+      }
+    }
+    const outer = open.find((f) => f.list);
+    return outer ? outer.k : -1;
+  }
+
   function candidates(textBeforeWord) {
     const toks = tokenize(textBeforeWord);
     let lastNewline = -1;
     for (let k = toks.length - 1; k >= 0; k -= 1) {
       if (toks[k].t === "nl") { lastNewline = k; break; }
     }
+    // Inside a multi-line list, the "current line" is the whole logical
+    // statement, from the line holding the list's "[" onward.
+    const listStart = openListStart(toks);
+    if (listStart >= 0) {
+      lastNewline = -1;
+      for (let k = listStart; k >= 0; k -= 1) {
+        if (toks[k].t === "nl") { lastNewline = k; break; }
+      }
+    }
     const before = toks.slice(0, lastNewline + 1);
-    const line = toks.slice(lastNewline + 1);
+    const line = toks.slice(lastNewline + 1).filter((tk) => tk.t !== "nl");
     const symbols = collectSymbols(toks);
     const blocks = analyzeBlocks(before);
     const stmt = currentStatement(line);
@@ -533,19 +580,41 @@ window.PseudocodeMonaco = Object.freeze({
     // existing textarea editor. Block keywords are deliberately based on
     // the pseudocode grammar rather than on braces, because pseudocode uses
     // named terminators (ENDIF, NEXT, ENDWHILE, ...).
+    // Indentation. A block header indents the lines after it whether or not it
+    // is complete yet: "WHILE NOT done" (DO still to be typed, or on the next
+    // line), "IF x = 1" (THEN on the next line, as in the SRS's own example) and
+    // headers followed by a trailing "// comment" all open a block, exactly like
+    // "WHILE NOT done DO" does.
+    //
+    // THEN may also sit alone on the line after its IF header. Like ELSE, such a
+    // line lines up with the header (decrease) and indents its body (increase),
+    // giving the layout shown in SRS section 3.7.1:
+    //
+    //     IF Answer = CorrectAnswer
+    //     THEN
+    //         Score <- Score + 1
+    //     ELSE
+    //         OUTPUT "Wrong Answer!"
+    //     ENDIF
+    //
+    // DO is deliberately NOT treated the same way: a lone-DO rule would outdent
+    // any line that merely starts with an uppercase word such as DONE or DOUBLE,
+    // because typing "DO" momentarily matches it. WHILE cond / DO on the next
+    // line is still valid; DO simply stays at the body's indentation.
     indentationRules: {
       increaseIndentPattern:
-        /^\s*(?:(?:IF\b.*\bTHEN\s*$)|(?:FOR\b.*$)|(?:REPEAT\s*$)|(?:WHILE\b.*\bDO\s*$)|(?:CASE\s+OF\b.*$)|(?:PROCEDURE\b.*$)|(?:FUNCTION\b.*$)|(?:ELSE\s*$))$/,
+        /^\s*(?:IF\b.*|FOR\b.*|WHILE\b.*|REPEAT\b.*|CASE\s+OF\b.*|PROCEDURE\b.*|FUNCTION\b.*|ELSE\b.*|THEN\s*(?:\/\/.*)?)$/,
       decreaseIndentPattern:
-        /^\s*(?:ENDIF\b|NEXT\b|UNTIL\b|ENDWHILE\b|ENDCASE\b|ENDPROCEDURE\b|ENDFUNCTION\b|ELSE\b).*$/,
+        /^\s*(?:(?:ENDIF|NEXT|UNTIL|ENDWHILE|ENDCASE|ENDPROCEDURE|ENDFUNCTION|ELSE)\b.*|THEN\s*(?:\/\/.*)?)$/,
     },
 
     // onEnterRules refine the block behavior for lines where entering a new
     // line should add a level, or where a closing keyword should move the
-    // cursor back to the surrounding block level.
+    // cursor back to the surrounding block level. (ELSE and THEN are handled by
+    // indentationRules above; adding them here would indent twice.)
     onEnterRules: [
       {
-        beforeText: /^\s*(?:IF\b.*\bTHEN|FOR\b.*|REPEAT\b|WHILE\b.*\bDO|CASE\s+OF\b.*|PROCEDURE\b.*|FUNCTION\b.*)\s*$/,
+        beforeText: /^\s*(?:IF\b.*|FOR\b.*|REPEAT\b.*|WHILE\b.*|CASE\s+OF\b.*|PROCEDURE\b.*|FUNCTION\b.*)$/,
         action: { indentAction: 1 }, // Indent
       },
       {
