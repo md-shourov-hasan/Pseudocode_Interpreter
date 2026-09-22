@@ -195,6 +195,24 @@ body {
   color: var(--waiting);
 }
 
+/* The source line + "^^^^" caret row shown just above an error's
+   line-chip/message, pinpointing exactly what the error is about. */
+.console-line.error-span {
+  margin: 2px 0 0;
+  padding: 0;
+  font-family: var(--font-code);
+  font-variant-ligatures: none;
+}
+
+.error-span-code {
+  color: var(--text);
+}
+
+.error-span-carets {
+  color: var(--error);
+  font-weight: 600;
+}
+
 .console-line.error-line {
   color: var(--error);
   display: flex;

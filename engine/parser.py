@@ -323,7 +323,7 @@ class Parser:
         if self._check(TokenType.LBRACKET):
             target = self._finish_index(name_tok)  # INPUT <identifier>[<index>...]
         else:
-            target = ast.Identifier(name_tok.lexeme, name_tok.line)
+            target = ast.Identifier(name_tok.lexeme, name_tok.line, name_tok.column, name_tok.end_column)
         return ast.Input(target, line)
 
     def _output_statement(self):
@@ -477,10 +477,10 @@ class Parser:
         if tok.type == TokenType.MINUS:
             self._advance()
             operand = self._case_value()
-            return ast.UnaryOp("-", operand, tok.line)
+            return ast.UnaryOp("-", operand, tok.line, tok.column, operand.end_column)
         if tok.type in _LITERAL_TYPE_OF:
             self._advance()
-            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line)
+            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line, tok.column, tok.end_column)
         raise PseudocodeError(
             tok.line,
             f"Expected a literal value for this CASE branch, but found {describe_token(tok)}.",
@@ -491,7 +491,7 @@ class Parser:
         if self._check(TokenType.LBRACKET):
             target = self._finish_index(name_tok)  # <identifier>[<index>...] <- <value>, FR-8.2/FR-8.4
         else:
-            target = ast.Identifier(name_tok.lexeme, name_tok.line)
+            target = ast.Identifier(name_tok.lexeme, name_tok.line, name_tok.column, name_tok.end_column)
         self._expect(TokenType.ASSIGN, "Expected '<-' to assign a value")
         if self._check(TokenType.LBRACKET):
             # "MyArray <- [1, 2, 3]" is not part of the language: an array is
@@ -526,7 +526,7 @@ class Parser:
         while self._check(TokenType.OR):
             tok = self._advance()
             right = self._and_expr()
-            left = ast.BinaryOp("OR", left, right, tok.line)
+            left = ast.BinaryOp("OR", left, right, tok.line, left.column, right.end_column)
         return left
 
     def _and_expr(self):
@@ -534,14 +534,14 @@ class Parser:
         while self._check(TokenType.AND):
             tok = self._advance()
             right = self._not_expr()
-            left = ast.BinaryOp("AND", left, right, tok.line)
+            left = ast.BinaryOp("AND", left, right, tok.line, left.column, right.end_column)
         return left
 
     def _not_expr(self):
         if self._check(TokenType.NOT):
             tok = self._advance()
             operand = self._not_expr()
-            return ast.UnaryOp("NOT", operand, tok.line)
+            return ast.UnaryOp("NOT", operand, tok.line, tok.column, operand.end_column)
         return self._relational()
 
     def _relational(self):
@@ -550,7 +550,9 @@ class Parser:
         if tok.type in _RELATIONAL_TOKENS:
             self._advance()
             right = self._additive()
-            left = ast.BinaryOp(_RELATIONAL_TOKENS[tok.type], left, right, tok.line)
+            left = ast.BinaryOp(
+                _RELATIONAL_TOKENS[tok.type], left, right, tok.line, left.column, right.end_column
+            )
         return left
 
     def _additive(self):
@@ -558,7 +560,7 @@ class Parser:
         while self._peek().type in (TokenType.PLUS, TokenType.MINUS):
             op_tok = self._advance()
             right = self._term()
-            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line)
+            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line, left.column, right.end_column)
         return left
 
     def _term(self):
@@ -566,14 +568,14 @@ class Parser:
         while self._peek().type in (TokenType.MULTIPLY, TokenType.DIVIDE):
             op_tok = self._advance()
             right = self._unary()
-            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line)
+            left = ast.BinaryOp(op_tok.lexeme, left, right, op_tok.line, left.column, right.end_column)
         return left
 
     def _unary(self):
         if self._check(TokenType.MINUS):
             op_tok = self._advance()
             operand = self._unary()
-            return ast.UnaryOp("-", operand, op_tok.line)
+            return ast.UnaryOp("-", operand, op_tok.line, op_tok.column, operand.end_column)
         return self._power()
 
     def _power(self):
@@ -581,7 +583,7 @@ class Parser:
         if self._check(TokenType.POWER):
             op_tok = self._advance()
             exponent = self._unary()  # right-associative
-            return ast.BinaryOp("^", base, exponent, op_tok.line)
+            return ast.BinaryOp("^", base, exponent, op_tok.line, base.column, exponent.end_column)
         return base
 
     def _primary(self):
@@ -589,12 +591,17 @@ class Parser:
 
         if tok.type in _LITERAL_TYPE_OF:
             self._advance()
-            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line)
+            return ast.Literal(tok.value, _LITERAL_TYPE_OF[tok.type], tok.line, tok.column, tok.end_column)
 
         if tok.type == TokenType.LPAREN:
-            self._advance()
+            lparen = self._advance()
             expr = self._expression()
-            self._expect(TokenType.RPAREN, "Expected ')' to close this expression")
+            rparen = self._expect(TokenType.RPAREN, "Expected ')' to close this expression")
+            # Widen the span to include the parentheses themselves, so an
+            # error blamed on this (now-grouped) expression underlines the
+            # parens too, e.g. "10 / (2 - 2)" rather than just "2 - 2".
+            expr.column = lparen.column
+            expr.end_column = rparen.end_column
             return expr
 
         if tok.type == TokenType.IDENTIFIER:
@@ -603,7 +610,7 @@ class Parser:
                 return self._finish_call(tok)
             if self._check(TokenType.LBRACKET):
                 return self._finish_index(tok)
-            return ast.Identifier(tok.lexeme, tok.line)
+            return ast.Identifier(tok.lexeme, tok.line, tok.column, tok.end_column)
 
         if tok.type == TokenType.LBRACKET:
             raise PseudocodeError(
@@ -624,16 +631,16 @@ class Parser:
             args.append(self._expression())
             while self._match(TokenType.COMMA):
                 args.append(self._expression())
-        self._expect(TokenType.RPAREN, f"Expected ')' to close the call to {name_tok.lexeme}")
-        return ast.Call(name_tok.lexeme, args, name_tok.line)
+        rparen = self._expect(TokenType.RPAREN, f"Expected ')' to close the call to {name_tok.lexeme}")
+        return ast.Call(name_tok.lexeme, args, name_tok.line, name_tok.column, rparen.end_column)
 
     def _finish_index(self, name_tok: Token):
         self._advance()  # consume '['
         indices = [self._expression()]
         while self._match(TokenType.COMMA):
             indices.append(self._expression())
-        self._expect(TokenType.RBRACKET, f"Expected ']' to close the index into {name_tok.lexeme}")
-        return ast.Index(name_tok.lexeme, indices, name_tok.line)
+        rbracket = self._expect(TokenType.RBRACKET, f"Expected ']' to close the index into {name_tok.lexeme}")
+        return ast.Index(name_tok.lexeme, indices, name_tok.line, name_tok.column, rbracket.end_column)
 
 
 def parse(tokens: list[Token]) -> ast.Program:

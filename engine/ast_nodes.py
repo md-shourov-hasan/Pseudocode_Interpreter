@@ -152,18 +152,31 @@ class WhileLoop:
 
 
 # ---- Expressions -----------------------------------------------------
+#
+# Every expression node also carries `column`/`end_column`: a 1-based,
+# inclusive character span on `line` covering exactly the source text this
+# node came from (e.g. a BinaryOp's span runs from its left operand's start
+# through its right operand's end; a parenthesised expression's span is
+# widened to include the parentheses). The interpreter attaches these spans
+# to PseudocodeError so the frontend can underline the offending text --
+# see engine/errors.py. They play no role in evaluation.
+
 
 @dataclass
 class Literal:
     value: object     # the Python value: int / float / str / bool
     data_type: str    # "INTEGER" | "REAL" | "CHAR" | "STRING" | "BOOLEAN"
     line: int
+    column: int
+    end_column: int
 
 
 @dataclass
 class Identifier:
     name: str
     line: int
+    column: int
+    end_column: int
 
 
 @dataclass
@@ -171,6 +184,8 @@ class UnaryOp:
     op: str           # "-" | "NOT"
     operand: object
     line: int
+    column: int
+    end_column: int
 
 
 @dataclass
@@ -179,6 +194,8 @@ class BinaryOp:
     left: object
     right: object
     line: int
+    column: int
+    end_column: int
 
 
 @dataclass
@@ -187,6 +204,8 @@ class Call:
     name: str
     args: list
     line: int
+    column: int
+    end_column: int
 
 
 @dataclass
@@ -195,3 +214,5 @@ class Index:
     name: str
     indices: list
     line: int
+    column: int
+    end_column: int

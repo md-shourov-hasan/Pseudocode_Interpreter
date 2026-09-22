@@ -291,14 +291,17 @@ class Interpreter:
                 stmt.element_type, values, is_constant=False, is_array=True, dimensions=dimensions
             )
 
-    def _ensure_scalar(self, symbol, name, line):
+    def _ensure_scalar(self, symbol, name, line, column=None, end_column=None):
         """Guard against using a whole array where a single value is
         expected (bare `Arr` instead of `Arr[i]`) — without this, the
         array's internal storage dict would leak straight into OUTPUT,
         arithmetic, etc. as an unhelpful Python repr."""
         if symbol.is_array:
             raise PseudocodeError(
-                line, f"'{name}' is an array — use an index, e.g. {name}[1], to access an element."
+                line,
+                f"'{name}' is an array — use an index, e.g. {name}[1], to access an element.",
+                column=column,
+                end_column=end_column,
             )
 
     def _exec_constant(self, stmt: ast.Constant):
@@ -321,20 +324,26 @@ class Interpreter:
             raise PseudocodeError(
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
             )
         if symbol.is_array:
             raise PseudocodeError(
                 stmt.line,
                 f"'{name}' is an array, so it can't be assigned as a whole. Assign each "
                 f"element separately using its index, e.g. {name}[1] <- value.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
             )
         if symbol.is_constant:
             raise PseudocodeError(
                 stmt.line,
                 f"'{name}' is a CONSTANT and cannot be reassigned.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
             )
         value = self._eval(stmt.value)
-        self._store(symbol, value, stmt.line, name)
+        self._store(symbol, value, stmt.line, name, stmt.value.column, stmt.value.end_column)
 
     @staticmethod
     def _element_label(name, index_tuple):
@@ -344,22 +353,45 @@ class Interpreter:
     def _exec_array_assignment(self, stmt: ast.Assignment):
         """<identifier>[<index>...] <- <value>   (FR-8.2, FR-8.4)"""
         target = stmt.target
-        symbol, index_tuple = self._resolve_array_element(target.name, target.indices, stmt.line)
+        symbol, index_tuple = self._resolve_array_element(
+            target.name, target.indices, stmt.line, target.column, target.end_column
+        )
         value = self._eval(stmt.value)
         value = self._coerce_for_type(
-            symbol.data_type, value, stmt.line, self._element_label(target.name, index_tuple)
+            symbol.data_type,
+            value,
+            stmt.line,
+            self._element_label(target.name, index_tuple),
+            stmt.value.column,
+            stmt.value.end_column,
         )
         symbol.value[index_tuple] = value
 
-    def _resolve_array_element(self, name, index_nodes, line):
+    def _resolve_array_element(self, name, index_nodes, line, column=None, end_column=None):
         """Shared by array reads (_eval_index) and array-element writes
         (_exec_array_assignment): looks up the array, evaluates and
-        bounds-checks each index, and returns (symbol, index_tuple)."""
+        bounds-checks each index, and returns (symbol, index_tuple).
+
+        `column`/`end_column` describe the WHOLE `name[...]` expression, for
+        errors about the array itself (undeclared, not an array, wrong
+        number of indices). An out-of-range or non-INTEGER index is instead
+        blamed on that specific index's own expression span, from
+        `index_nodes`."""
         symbol = self.symbols.get(name)
         if symbol is None:
-            raise PseudocodeError(line, f"'{name}' is used here but was never declared with DECLARE.")
+            raise PseudocodeError(
+                line,
+                f"'{name}' is used here but was never declared with DECLARE.",
+                column=column,
+                end_column=end_column,
+            )
         if not symbol.is_array:
-            raise PseudocodeError(line, f"'{name}' is not an array, so it can't be indexed.")
+            raise PseudocodeError(
+                line,
+                f"'{name}' is not an array, so it can't be indexed.",
+                column=column,
+                end_column=end_column,
+            )
 
         if len(index_nodes) != len(symbol.dimensions):
             want = len(symbol.dimensions)
@@ -367,27 +399,38 @@ class Interpreter:
             raise PseudocodeError(
                 line,
                 f"'{name}' is a {want}D array and needs {want} index/indices, but got {got}.",
+                column=column,
+                end_column=end_column,
             )
 
         indices = []
         for index_node, (lower, upper) in zip(index_nodes, symbol.dimensions):
             index_value = self._eval(index_node)
-            index_value = self._expect_integer(None, index_value, line, f"The index for '{name}'")
+            index_value = self._expect_integer(
+                None,
+                index_value,
+                line,
+                f"The index for '{name}'",
+                column=index_node.column,
+                end_column=index_node.end_column,
+            )
             if index_value < lower or index_value > upper:
                 raise PseudocodeError(
                     line,
                     f"Index {index_value} is out of bounds for '{name}' "
                     f"(valid range is {lower} to {upper}).",
+                    column=index_node.column,
+                    end_column=index_node.end_column,
                 )
             indices.append(index_value)
         return symbol, tuple(indices)
 
-    def _store(self, symbol, value, line, name):
+    def _store(self, symbol, value, line, name, column=None, end_column=None):
         """Shared type-checked store used by plain assignment and by the
         FOR loop's per-iteration update of its loop variable."""
-        symbol.value = self._coerce_for_type(symbol.data_type, value, line, name)
+        symbol.value = self._coerce_for_type(symbol.data_type, value, line, name, column, end_column)
 
-    def _coerce_for_type(self, data_type, value, line, name):
+    def _coerce_for_type(self, data_type, value, line, name, column=None, end_column=None):
         # A REAL result (e.g. from "/") assigned into an INTEGER variable is
         # narrowed by truncating toward zero, rather than treated as a type
         # error — this is a deliberate product decision (requested), since
@@ -395,7 +438,7 @@ class Interpreter:
         # arithmetic even when the mathematical quotient looks INTEGER-like.
         if data_type == "INTEGER" and isinstance(value, float) and not isinstance(value, bool):
             value = int(value)
-        self._check_assignable(data_type, value, line, name)
+        self._check_assignable(data_type, value, line, name, column, end_column)
         # INTEGER assigned into a REAL variable is widened, per FR-2.2 semantics.
         if data_type == "REAL" and isinstance(value, int) and not isinstance(value, bool):
             value = float(value)
@@ -411,8 +454,10 @@ class Interpreter:
             raise PseudocodeError(
                 stmt.line,
                 f"'{name}' is used here but was never declared with DECLARE.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
             )
-        self._ensure_scalar(symbol, name, stmt.line)
+        self._ensure_scalar(symbol, name, stmt.line, stmt.target.column, stmt.target.end_column)
         raw = self._input_fn()
         try:
             value = self._coerce_input(raw, symbol.data_type)
@@ -420,6 +465,8 @@ class Interpreter:
             raise PseudocodeError(
                 stmt.line,
                 f"Couldn't read '{raw}' as {_with_article(symbol.data_type)} value for '{name}'.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
             )
         symbol.value = value
 
@@ -427,7 +474,9 @@ class Interpreter:
         """INPUT <identifier>[<index>...] — reads directly into an array
         element (FR-4.1 combined with FR-8.2/FR-8.4)."""
         target = stmt.target
-        symbol, index_tuple = self._resolve_array_element(target.name, target.indices, stmt.line)
+        symbol, index_tuple = self._resolve_array_element(
+            target.name, target.indices, stmt.line, target.column, target.end_column
+        )
         raw = self._input_fn()
         try:
             value = self._coerce_input(raw, symbol.data_type)
@@ -501,8 +550,10 @@ class Interpreter:
             condition = self._eval(stmt.until_condition)
             if not isinstance(condition, bool):
                 raise PseudocodeError(
-                    stmt.line,
+                    stmt.until_condition.line,
                     f"The UNTIL condition must evaluate to a BOOLEAN value, but got {self._type_name(condition)}.",
+                    column=stmt.until_condition.column,
+                    end_column=stmt.until_condition.end_column,
                 )
             if condition:
                 break
@@ -513,8 +564,10 @@ class Interpreter:
             condition = self._eval(stmt.condition)
             if not isinstance(condition, bool):
                 raise PseudocodeError(
-                    stmt.line,
+                    stmt.condition.line,
                     f"The WHILE condition must evaluate to a BOOLEAN value, but got {self._type_name(condition)}.",
+                    column=stmt.condition.column,
+                    end_column=stmt.condition.end_column,
                 )
             if not condition:
                 break
@@ -525,8 +578,10 @@ class Interpreter:
         condition = self._eval(stmt.condition)
         if not isinstance(condition, bool):
             raise PseudocodeError(
-                stmt.line,
+                stmt.condition.line,
                 f"The IF condition must evaluate to a BOOLEAN value, but got {self._type_name(condition)}.",
+                column=stmt.condition.column,
+                end_column=stmt.condition.end_column,
             )
         body = stmt.then_body if condition else stmt.else_body
         for s in body:
@@ -577,8 +632,10 @@ class Interpreter:
             raise PseudocodeError(
                 node.line,
                 f"'{node.name}' is used here but was never declared with DECLARE.",
+                column=node.column,
+                end_column=node.end_column,
             )
-        self._ensure_scalar(symbol, node.name, node.line)
+        self._ensure_scalar(symbol, node.name, node.line, node.column, node.end_column)
         return symbol.value
 
     def _eval_unary(self, node: ast.UnaryOp):
@@ -586,7 +643,10 @@ class Interpreter:
         if node.op == "-":
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise PseudocodeError(
-                    node.line, "The '-' operator can only be used on INTEGER or REAL values."
+                    node.line,
+                    "The '-' operator can only be used on INTEGER or REAL values.",
+                    column=node.column,
+                    end_column=node.end_column,
                 )
             return -value
         if node.op == "NOT":
@@ -594,9 +654,11 @@ class Interpreter:
                 raise PseudocodeError(
                     node.line,
                     f"The NOT operator needs a BOOLEAN value, but got {self._type_name(value)}.",
+                    column=node.column,
+                    end_column=node.end_column,
                 )
             return not value
-        raise PseudocodeError(node.line, f"Unknown unary operator '{node.op}'.")
+        raise PseudocodeError(node.line, f"Unknown unary operator '{node.op}'.", column=node.column, end_column=node.end_column)
 
     def _eval_binary(self, node: ast.BinaryOp):
         left = self._eval(node.left)
@@ -604,14 +666,15 @@ class Interpreter:
         op = node.op
 
         if op in ("+", "-", "*", "/", "^"):
-            return self._eval_arithmetic(op, left, right, node.line)
+            return self._eval_arithmetic(op, left, right, node)
         if op in ("=", "<", "<=", ">", ">=", "<>"):
-            return self._eval_relational(op, left, right, node.line)
+            return self._eval_relational(op, left, right, node)
         if op in ("AND", "OR"):
-            return self._eval_logical(op, left, right, node.line)
-        raise PseudocodeError(node.line, f"Unknown operator '{op}'.")
+            return self._eval_logical(op, left, right, node)
+        raise PseudocodeError(node.line, f"Unknown operator '{op}'.", column=node.column, end_column=node.end_column)
 
-    def _eval_logical(self, op, left, right, line):
+    def _eval_logical(self, op, left, right, node):
+        line, column, end_column = node.line, node.column, node.end_column
         # Both sides are evaluated (no short-circuiting) — see the parser's
         # module docstring for the reasoning.
         for v in (left, right):
@@ -619,10 +682,13 @@ class Interpreter:
                 raise PseudocodeError(
                     line,
                     f"The '{op}' operator needs BOOLEAN values on both sides, but got {self._type_name(v)}.",
+                    column=column,
+                    end_column=end_column,
                 )
         return (left and right) if op == "AND" else (left or right)
 
-    def _eval_arithmetic(self, op, left, right, line):
+    def _eval_arithmetic(self, op, left, right, node):
+        line, column, end_column = node.line, node.column, node.end_column
         if op == "+" and isinstance(left, str) and isinstance(right, str):
             return left + right  # string concatenation, common in student code
         for v in (left, right):
@@ -630,6 +696,8 @@ class Interpreter:
                 raise PseudocodeError(
                     line,
                     f"The '{op}' operator needs INTEGER or REAL values on both sides.",
+                    column=column,
+                    end_column=end_column,
                 )
         if op == "+":
             return left + right
@@ -639,37 +707,56 @@ class Interpreter:
             return left * right
         if op == "/":
             if right == 0:
-                raise PseudocodeError(line, "Division by zero: the program tried to divide by zero.")
+                raise PseudocodeError(
+                    line,
+                    "Division by zero: the program tried to divide by zero.",
+                    column=column,
+                    end_column=end_column,
+                )
             result = left / right
             if isinstance(result, float) and not math.isfinite(result):
                 raise PseudocodeError(
                     line,
                     "The division produced a number outside the supported REAL range.",
+                    column=column,
+                    end_column=end_column,
                 )
             return result
         if op == "^":
             try:
                 result = left ** right
             except ZeroDivisionError:
-                raise PseudocodeError(line, "Division by zero: the program tried to divide by zero.") from None
+                raise PseudocodeError(
+                    line,
+                    "Division by zero: the program tried to divide by zero.",
+                    column=column,
+                    end_column=end_column,
+                ) from None
             except (OverflowError, ValueError):
                 raise PseudocodeError(
                     line,
                     "The power calculation produced a number outside the supported range.",
+                    column=column,
+                    end_column=end_column,
                 ) from None
             if isinstance(result, complex):
                 raise PseudocodeError(
                     line,
                     "The '^' operator must produce an INTEGER or REAL value.",
+                    column=column,
+                    end_column=end_column,
                 )
             if isinstance(result, float) and not math.isfinite(result):
                 raise PseudocodeError(
                     line,
                     "The power calculation produced a number outside the supported REAL range.",
+                    column=column,
+                    end_column=end_column,
                 )
             return result
 
-    def _eval_relational(self, op, left, right, line):
+    def _eval_relational(self, op, left, right, node):
+        line, column, end_column = node.line, node.column, node.end_column
         try:
             if op == "=":
                 return left == right
@@ -685,7 +772,10 @@ class Interpreter:
                 return left != right
         except TypeError:
             raise PseudocodeError(
-                line, f"Can't compare {self._type_name(left)} and {self._type_name(right)} with '{op}'."
+                line,
+                f"Can't compare {self._type_name(left)} and {self._type_name(right)} with '{op}'.",
+                column=column,
+                end_column=end_column,
             )
 
     def _eval_call(self, node: ast.Call):
@@ -695,6 +785,8 @@ class Interpreter:
                 node.line,
                 f"'{name}(...)' isn't a recognized built-in function, and user-defined "
                 f"procedures/functions aren't supported yet — coming in a later milestone.",
+                column=node.column,
+                end_column=node.end_column,
             )
         args = [self._eval(a) for a in node.args]
         return self._BUILTIN_HANDLERS[name](self, args, node.line)
@@ -714,7 +806,7 @@ class Interpreter:
                 line, f"{name}'s {which} must be INTEGER or REAL, but got {self._type_name(value)}."
             )
 
-    def _expect_integer(self, name, value, line, which="argument"):
+    def _expect_integer(self, name, value, line, which="argument", column=None, end_column=None):
         """Return `value` as an int, or raise.
 
         A REAL that is a whole number (5.0, as produced by 10 / 2 or
@@ -729,7 +821,10 @@ class Interpreter:
         subject = f"{name}'s {which}" if name else which
         if isinstance(value, bool):
             raise PseudocodeError(
-                line, f"{subject} must be INTEGER, but got {self._type_name(value)}."
+                line,
+                f"{subject} must be INTEGER, but got {self._type_name(value)}.",
+                column=column,
+                end_column=end_column,
             )
         if isinstance(value, int):
             return value
@@ -741,9 +836,14 @@ class Interpreter:
                 line,
                 f"{subject} must be INTEGER, but got the REAL value "
                 f"{self._format_real(value)}, which is not a whole number.{hint}",
+                column=column,
+                end_column=end_column,
             )
         raise PseudocodeError(
-            line, f"{subject} must be INTEGER, but got {self._type_name(value)}."
+            line,
+            f"{subject} must be INTEGER, but got {self._type_name(value)}.",
+            column=column,
+            end_column=end_column,
         )
 
     def _expect_string(self, name, value, line, which="argument"):
@@ -842,7 +942,9 @@ class Interpreter:
     def _eval_index(self, node: ast.Index):
         """<identifier>[<index>...]   (array element read; the write side
         is _exec_array_assignment)."""
-        symbol, index_tuple = self._resolve_array_element(node.name, node.indices, node.line)
+        symbol, index_tuple = self._resolve_array_element(
+            node.name, node.indices, node.line, node.column, node.end_column
+        )
         return symbol.value[index_tuple]
 
     # ---- type checking -----------------------------------------------
@@ -863,31 +965,39 @@ class Interpreter:
             f"Couldn't determine a supported pseudocode data type for '{name}'.",
         )
 
-    def _check_assignable(self, data_type, value, line, name):
+    def _check_assignable(self, data_type, value, line, name, column=None, end_column=None):
         valid_types = _PYTHON_TYPES_FOR[data_type]
         # bool is a subclass of int in Python — keep BOOLEAN and INTEGER distinct.
         if data_type != "BOOLEAN" and isinstance(value, bool):
             raise PseudocodeError(
                 line,
                 f"Can't assign a BOOLEAN value to '{name}', which is declared as {data_type}.",
+                column=column,
+                end_column=end_column,
             )
         if data_type == "BOOLEAN" and not isinstance(value, bool):
             raise PseudocodeError(
                 line,
                 f"Can't assign {_with_article(self._type_name(value))} value to '{name}', "
                 f"which is declared as BOOLEAN.",
+                column=column,
+                end_column=end_column,
             )
         if not isinstance(value, valid_types):
             raise PseudocodeError(
                 line,
                 f"Can't assign {_with_article(self._type_name(value))} value to '{name}', "
                 f"which is declared as {data_type}.",
+                column=column,
+                end_column=end_column,
             )
         if data_type == "CHAR" and isinstance(value, str) and len(value) != 1:
             raise PseudocodeError(
                 line,
                 f"Can't assign a STRING value to '{name}', which is declared as CHAR "
                 f"(CHAR holds exactly one character).",
+                column=column,
+                end_column=end_column,
             )
 
     def _type_name(self, value) -> str:

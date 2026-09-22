@@ -175,8 +175,10 @@ class Token:
     lexeme: str      # raw source text for this token
     value: object     # literal value where applicable (int/float/str/bool), else None
     line: int         # 1-based line number, for FR-11.1 style error reporting
+    column: int = 1        # 1-based column of the token's first character
+    end_column: int = 1    # 1-based column of the token's LAST character (inclusive)
 
     def __repr__(self) -> str:
         if self.value is not None:
-            return f"Token({self.type.name}, {self.value!r}, line={self.line})"
-        return f"Token({self.type.name}, {self.lexeme!r}, line={self.line})"
+            return f"Token({self.type.name}, {self.value!r}, line={self.line}, col={self.column})"
+        return f"Token({self.type.name}, {self.lexeme!r}, line={self.line}, col={self.column})"

@@ -34,6 +34,13 @@ class Lexer:
         self.source = source
         self.pos = 0
         self.line = 1
+        # Index (into `source`) of the first character of the current line.
+        # Together with `pos`, this gives 1-based columns without a second
+        # pass over the source: column = pos - line_start + 1.
+        self.line_start = 0
+        # Position where the token currently being scanned started; set at
+        # the top of _scan_token() and read by _add()/_error_here().
+        self._tok_start = 0
         self.tokens: list[Token] = []
 
     # ---- public API -----------------------------------------------------
@@ -41,7 +48,8 @@ class Lexer:
     def tokenize(self) -> list[Token]:
         while not self._at_end():
             self._scan_token()
-        self.tokens.append(Token(TokenType.EOF, "", None, self.line))
+        eof_col = self.pos - self.line_start + 1
+        self.tokens.append(Token(TokenType.EOF, "", None, self.line, eof_col, eof_col))
         return self.tokens
 
     # ---- helpers ----------------------------------------------------------
@@ -59,7 +67,14 @@ class Lexer:
         return ch
 
     def _add(self, type_: TokenType, lexeme: str, value=None):
-        self.tokens.append(Token(type_, lexeme, value, self.line))
+        column = self._tok_start - self.line_start + 1
+        end_column = column + len(lexeme) - 1 if lexeme else column
+        self.tokens.append(Token(type_, lexeme, value, self.line, column, end_column))
+
+    def _column_here(self) -> int:
+        """1-based column of the token currently being scanned (its first
+        character), for error messages raised mid-scan."""
+        return self._tok_start - self.line_start + 1
 
     def _match(self, expected: str) -> bool:
         if self._peek() == expected:
@@ -70,12 +85,14 @@ class Lexer:
     # ---- main dispatch ------------------------------------------------
 
     def _scan_token(self):
+        self._tok_start = self.pos
         ch = self._advance()
 
         # Newlines are significant (statement separators)
         if ch == "\n":
             self._add(TokenType.NEWLINE, "\\n")
             self.line += 1
+            self.line_start = self.pos
             return
 
         # Whitespace (not newline) is ignored
@@ -129,6 +146,8 @@ class Lexer:
                         self.line,
                         "Found '<--'. This looks like a typo for the assignment arrow '<-'. "
                         "If you meant to assign a negative number, add a space: '<- -5'.",
+                        column=self._column_here(),
+                        end_column=self._column_here() + 2,
                     )
                 self._add(TokenType.ASSIGN, "<-")
             elif self._match("="):
@@ -164,12 +183,18 @@ class Lexer:
             self._add(single_char_ops[ch], ch)
             return
 
-        raise PseudocodeError(self.line, f"Unexpected character '{ch}'.")
+        raise PseudocodeError(
+            self.line,
+            f"Unexpected character '{ch}'.",
+            column=self._column_here(),
+            end_column=self._column_here(),
+        )
 
     # ---- literal scanners ------------------------------------------------
 
     def _string(self):
         start_line = self.line
+        start_col = self._column_here()
         chars = []
         while not self._at_end() and self._peek() != '"':
             c = self._advance()
@@ -177,23 +202,38 @@ class Lexer:
                 raise PseudocodeError(
                     start_line,
                     "String is missing a closing \" before the end of the line.",
+                    column=start_col,
+                    end_column=start_col,
                 )
             chars.append(c)
         if self._at_end():
-            raise PseudocodeError(start_line, "String is missing a closing \".")
+            raise PseudocodeError(
+                start_line,
+                "String is missing a closing \".",
+                column=start_col,
+                end_column=start_col,
+            )
         self._advance()  # consume closing quote
         text = "".join(chars)
         self._add(TokenType.STRING_LITERAL, f'"{text}"', text)
 
     def _char(self):
         start_line = self.line
+        start_col = self._column_here()
         if self._at_end() or self._peek() == "\n":
-            raise PseudocodeError(start_line, "Character literal is missing a closing '.")
+            raise PseudocodeError(
+                start_line,
+                "Character literal is missing a closing '.",
+                column=start_col,
+                end_column=start_col,
+            )
         c = self._advance()
         if self._peek() != "'":
             raise PseudocodeError(
                 start_line,
                 "A CHAR literal must contain exactly one character between quotes, e.g. 'x'.",
+                column=start_col,
+                end_column=start_col,
             )
         self._advance()  # consume closing quote
         self._add(TokenType.CHAR_LITERAL, f"'{c}'", c)
@@ -214,6 +254,8 @@ class Lexer:
                 raise PseudocodeError(
                     start_line,
                     "This REAL literal is outside the supported numeric range.",
+                    column=self._column_here(),
+                    end_column=self._column_here() + len(text) - 1,
                 )
             self._add(TokenType.REAL_LITERAL, text, value)
             return

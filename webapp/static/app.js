@@ -28,8 +28,11 @@ OUTPUT "Score: ", Score
 `;
 
 let editor = null;
+let monacoRef = null;
 let currentRunId = null;
 let pollTimer = null;
+
+const ERROR_MARKER_OWNER = "pseudocode-errors";
 
 // ---- status ------------------------------------------------------
 
@@ -41,6 +44,7 @@ function setStatus(state, label) {
 // ---- Monaco editor ------------------------------------------------
 
 function initializeEditor(monaco) {
+  monacoRef = monaco;
   const language = window.PseudocodeMonaco;
   if (!language) {
     throw new Error("Pseudocode Monaco language definition failed to load.");
@@ -145,7 +149,117 @@ function appendLine(text, className) {
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-function appendError(line, message) {
+// ---- console syntax highlighting ---------------------------------------
+//
+// The error console re-prints one line of the user's source (see
+// appendSourceSpan below). It should look like the same code the editor is
+// showing, not plain white text, so it's colorized with the exact same
+// token categories and theme colors Monaco uses (window.PseudocodeMonaco's
+// Monarch `language` rules and `theme` rules) — a small hand-rolled
+// tokenizer that mirrors that Monarch grammar closely enough for a single
+// line, rather than spinning up a hidden editor instance just to ask Monaco
+// to tokenize a string.
+
+let _pseudocodeThemeColors = null;
+function themeColorFor(tokenType) {
+  if (!_pseudocodeThemeColors) {
+    _pseudocodeThemeColors = {};
+    const rules = window.PseudocodeMonaco?.theme?.rules ?? [];
+    rules.forEach((rule) => {
+      _pseudocodeThemeColors[rule.token] = `#${rule.foreground}`;
+    });
+  }
+  return _pseudocodeThemeColors[tokenType];
+}
+
+let _keywordTokenTypes = null;
+function keywordTokenType(word) {
+  if (!_keywordTokenTypes) {
+    _keywordTokenTypes = new Map();
+    const lang = window.PseudocodeMonaco?.language;
+    if (lang) {
+      // Same grouping -> token-type mapping as the Monarch `cases` block in
+      // pseudocode-monaco.js, so a keyword always gets the same color here
+      // as it does in the editor.
+      const groups = [
+        [lang.typeKeywords, "type"],
+        [lang.controlKeywords, "keyword.control"],
+        [lang.declarationKeywords, "keyword.declaration"],
+        [lang.ioKeywords, "keyword.io"],
+        [lang.arrayKeywords, "keyword.array"],
+        [lang.fileKeywords, "keyword.file"],
+        [lang.routineKeywords, "keyword.routine"],
+        [lang.logicalKeywords, "keyword.operator"],
+        [lang.booleanLiterals, "constant.language"],
+        [lang.builtinFunctions, "predefined"],
+      ];
+      groups.forEach(([words, tokenType]) => {
+        (words || []).forEach((w) => _keywordTokenTypes.set(w, tokenType));
+      });
+    }
+  }
+  return _keywordTokenTypes.get(word);
+}
+
+// Ordered the same way as the Monarch tokenizer's `root` rules: comments
+// before the divide operator, literals before identifiers, etc.
+const _HIGHLIGHT_RULES = [
+  [/^\/\/.*/, "comment"],
+  [/^'[^'\r\n]*'/, "string"],
+  [/^"[^"\r\n]*"/, "string"],
+  [/^\d+\.\d+/, "number"],
+  [/^\d+/, "number"],
+  [/^(?:<-|\u2190|<>|<=|>=|[+\-*/%^=<>])/, "operator"],
+  [/^[()[\]{},:]/, "delimiter"],
+  [/^[A-Za-z_][A-Za-z0-9_]*/, "word"], // resolved to a specific token type below
+  [/^\s+/, null], // whitespace: no color, inherits the row's default text color
+];
+
+// Colorizes one line of pseudocode into a DocumentFragment of <span>s,
+// preserving every character (including spaces) so the caret row appended
+// underneath it in appendSourceSpan still lines up exactly.
+function highlightPseudocodeLine(line) {
+  const frag = document.createDocumentFragment();
+  const appendSpan = (text, tokenType) => {
+    const span = document.createElement("span");
+    const color = tokenType && themeColorFor(tokenType);
+    if (color) span.style.color = color;
+    span.textContent = text;
+    frag.appendChild(span);
+  };
+
+  let rest = line;
+  while (rest.length > 0) {
+    let matched = false;
+    for (const [pattern, tokenType] of _HIGHLIGHT_RULES) {
+      const m = pattern.exec(rest);
+      if (!m) continue;
+      const text = m[0];
+      appendSpan(text, tokenType === "word" ? keywordTokenType(text) ?? "identifier" : tokenType);
+      rest = rest.slice(text.length);
+      matched = true;
+      break;
+    }
+    if (!matched) {
+      // A character the grammar doesn't recognize — show it plainly rather
+      // than dropping it, so the underline below still lines up.
+      appendSpan(rest[0], null);
+      rest = rest.slice(1);
+    }
+  }
+  return frag;
+}
+
+// column/endColumn are the 1-based, inclusive character span of the error
+// on `line` (see engine/errors.py's PseudocodeError). Both are undefined
+// for errors that don't point at a specific piece of text (e.g. a missing
+// ENDIF, or a failure with no source location at all) -- those fall back
+// to the line-chip-only rendering this always had.
+function appendError(line, message, column, endColumn) {
+  if (line && column && editor) {
+    appendSourceSpan(line, column, endColumn);
+  }
+
   const wrap = document.createElement("div");
   wrap.className = "console-line error-line";
   const chip = document.createElement("span");
@@ -159,12 +273,74 @@ function appendError(line, message) {
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
+// Renders the offending source line followed by a row of "^" carets under
+// the exact span that's wrong, e.g.:
+//
+//   Score <- "hello"
+//          ^^^^^^^
+//
+// so the student sees precisely which piece of text the error is about,
+// not just which line. The source line is syntax-highlighted the same way
+// the editor above it is (see highlightPseudocodeLine), so it reads as the
+// same code rather than a plain-text copy of it.
+function appendSourceSpan(line, column, endColumn) {
+  const model = editor.getModel();
+  if (!model || line < 1 || line > model.getLineCount()) return;
+
+  const sourceLine = model.getLineContent(line);
+  const start = Math.max(1, column);
+  const end = Math.max(start, endColumn || start);
+  const caretCount = end - start + 1;
+
+  const block = document.createElement("pre");
+  block.className = "console-line error-span";
+
+  const codeRow = document.createElement("div");
+  codeRow.className = "error-span-code";
+  codeRow.appendChild(highlightPseudocodeLine(sourceLine));
+
+  const caretRow = document.createElement("div");
+  caretRow.className = "error-span-carets";
+  caretRow.textContent = " ".repeat(start - 1) + "^".repeat(caretCount);
+
+  block.appendChild(codeRow);
+  block.appendChild(caretRow);
+  consoleEl.appendChild(block);
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+// ---- editor underline (squiggly marker) --------------------------------
+
+function clearErrorMarkers() {
+  if (monacoRef && editor) {
+    monacoRef.editor.setModelMarkers(editor.getModel(), ERROR_MARKER_OWNER, []);
+  }
+}
+
+function setErrorMarker(line, message, column, endColumn) {
+  if (!monacoRef || !editor || !line || !column) return;
+  const end = Math.max(column, endColumn || column);
+  monacoRef.editor.setModelMarkers(editor.getModel(), ERROR_MARKER_OWNER, [
+    {
+      startLineNumber: line,
+      startColumn: column,
+      endLineNumber: line,
+      // Monaco's endColumn is exclusive (one past the last character),
+      // while our span's end_column is inclusive -- hence the +1.
+      endColumn: end + 1,
+      message,
+      severity: monacoRef.MarkerSeverity.Error,
+    },
+  ]);
+}
+
 // ---- run lifecycle -----------------------------------------------------
 
 async function startRun() {
   if (!editor) return;
 
   clearConsole();
+  clearErrorMarkers();
   hideInputRow();
   runBtn.disabled = true;
   setStatus("running", "Running…");
@@ -210,7 +386,8 @@ async function poll() {
     } else if (event.type === "waiting") {
       showInputRow();
     } else if (event.type === "error") {
-      appendError(event.line, event.message);
+      appendError(event.line, event.message, event.column, event.end_column);
+      setErrorMarker(event.line, event.message, event.column, event.end_column);
     } else if (event.type === "done") {
       appendLine("Program finished.", "done-line");
     }

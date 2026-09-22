@@ -63,7 +63,15 @@ def _worker_main(source: str, output_queue, input_queue):
         interp.run(program)
         output_queue.put({"type": "done"})
     except PseudocodeError as e:
-        output_queue.put({"type": "error", "line": e.line, "message": e.message})
+        output_queue.put(
+            {
+                "type": "error",
+                "line": e.line,
+                "message": e.message,
+                "column": e.column,
+                "end_column": e.end_column,
+            }
+        )
     except Exception:
         # Keep the web boundary strict even if a future engine change raises
         # something outside the normal PseudocodeError contract.
