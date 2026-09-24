@@ -32,7 +32,7 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     function_decl  := FUNCTION IDENTIFIER ( '(' param_list? ')' )?
                        RETURNS data_type block ENDFUNCTION                  -- FR-10.3
     param_list     := param ( ',' param )*
-    param          := IDENTIFIER ':' ( data_type | array_type )       -- array_type: extension, see below
+    param          := IDENTIFIER ':' data_type                          -- FR-10.1, FR-10.3
     call_stmt      := CALL IDENTIFIER ( '(' arglist? ')' )?                 -- FR-10.2
     return_stmt    := RETURN expression                                    -- FR-10.3, only inside a FUNCTION
 
@@ -64,13 +64,12 @@ nesting isn't part of the grammar either. `Call` (the expression node)
 is reused for user-defined FUNCTION calls, exactly as it already is for
 built-ins -- only the interpreter needs to tell them apart.
 
-An ARRAY parameter (`param := IDENTIFIER ':' array_type` above) is an
-extension beyond the SRS's literal `<par n> : <data type>` grammar,
-added on request; it reuses the exact same `ARRAY[...] OF <data type>`
-syntax as a DECLARE (see `_array_type_tail`, shared by both), so there's
-only one ARRAY syntax in the language. See Interpreter._bind_array_argument
-for how it's passed (by reference, unlike a scalar parameter) and how its
-declared bounds are checked against the caller's argument array.
+A PROCEDURE/FUNCTION parameter is always scalar (`param := IDENTIFIER ':'
+data_type`, matching the SRS's literal `<par n> : <data type>` grammar
+exactly) -- an array cannot be passed as a parameter. Arrays remain
+usable only via DECLARE, element assignment/read, and INPUT into an
+element (FR-8.x); a whole array can't cross a PROCEDURE/FUNCTION
+boundary in either direction.
 
 File handling (Milestone 9) remains unimplemented.
 """
@@ -346,11 +345,10 @@ class Parser:
         return ast.Declare(names, _DATA_TYPE_TOKENS[type_tok.type], line)
 
     def _array_type_tail(self, line):
-        """The ARRAY[...] OF <type> part shared by a DECLARE (FR-8.1,
-        FR-8.3) and an array PROCEDURE/FUNCTION parameter (an extension
-        beyond the SRS's literal grammar, added on request -- see the
-        module docstring and _param below). Assumes ARRAY is the next
-        token. Returns (dimensions, element_type)."""
+        """The ARRAY[...] OF <type> part of a DECLARE (FR-8.1, FR-8.3).
+        Assumes ARRAY is the next token. Returns (dimensions, element_type).
+        (PROCEDURE/FUNCTION parameters never reach this -- see _param,
+        which rejects ARRAY there directly.)"""
         self._advance()  # consume ARRAY
         self._expect(TokenType.LBRACKET, "Expected '[' after ARRAY")
         dimensions = [self._array_bound_pair()]
@@ -475,21 +473,22 @@ class Parser:
 
     def _param(self):
         """<identifier> ':' <data type> -- one parameter (FR-10.1, FR-10.3).
-        Also accepts an ARRAY parameter (<identifier> ':' ARRAY[...] OF
-        <data type>) -- an extension beyond the SRS's literal grammar,
-        added on request; see ast_nodes.Param and
-        Interpreter._bind_array_argument for how it's passed (by
-        reference, unlike a scalar parameter)."""
+        A parameter is always scalar; an array cannot be passed as a
+        PROCEDURE/FUNCTION parameter (see this module's docstring)."""
         name_tok = self._expect(TokenType.IDENTIFIER, "Expected a parameter name")
         self._expect(TokenType.COLON, "Expected ':' after the parameter name")
         if self._check(TokenType.ARRAY):
-            dimensions, element_type = self._array_type_tail(name_tok.line)
-            return ast.Param(name_tok.lexeme, element_type, is_array=True, dimensions=dimensions)
+            raise PseudocodeError(
+                name_tok.line,
+                f"Parameter '{name_tok.lexeme}' can't be declared as an ARRAY -- an array can't be "
+                f"passed as a PROCEDURE/FUNCTION parameter. Pass individual elements (e.g. "
+                f"MyArray[1]) as separate parameters instead.",
+            )
         type_tok = self._peek()
         if type_tok.type not in _DATA_TYPE_TOKENS:
             raise PseudocodeError(
                 type_tok.line,
-                f"Expected a data type (INTEGER, REAL, CHAR, STRING, BOOLEAN, or ARRAY) for "
+                f"Expected a data type (INTEGER, REAL, CHAR, STRING, or BOOLEAN) for "
                 f"parameter '{name_tok.lexeme}', but found {describe_token(type_tok)}.",
             )
         self._advance()

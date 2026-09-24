@@ -45,10 +45,6 @@ Implements:
     FR-10.4       A FUNCTION can only be invoked from within an
                   expression, never with CALL (checked in _exec_call
                   and _eval_call respectively)
-    (ext)         ARRAY parameters for PROCEDURE/FUNCTION, passed by
-                  reference -- added on request, beyond the SRS's
-                  literal <par n> : <data type> grammar (see
-                  _bind_array_argument)
     (ext)         AND / OR / NOT boolean connectives in conditions,
                   requested beyond the reference syntax guide
 
@@ -66,19 +62,10 @@ scope containing only its parameters and whatever it DECLAREs itself.
 Global variables from the main program are NOT visible inside a
 procedure/function body -- but global CONSTANTs are, since they're
 read-only and so carry none of the aliasing/mutation risk a shared
-global variable would. A scalar parameter is passed by value, like an
-ordinary assignment (REAL/INTEGER narrowing and widening apply the
-same way). See Interpreter._call_frame.
-
-Array parameters (an extension beyond the SRS's literal grammar, added
-on request) are the one deliberate exception to "passed by value": an
-ARRAY parameter is passed BY REFERENCE -- the callee's local Symbol
-shares the caller's own storage dict, so in-place mutation (sorting,
-filling, swapping elements, ...) is visible to the caller once the call
-returns. This is what makes an array parameter actually useful for the
-classic IGCSE tasks (BubbleSort, FillArray, LinearSearch, ...); a
-copy-in/copy-out array parameter would defeat the point. See
-Interpreter._bind_array_argument.
+global variable would. A parameter is always scalar and passed by
+value, like an ordinary assignment (REAL/INTEGER narrowing and
+widening apply the same way) -- arrays cannot be passed as
+PROCEDURE/FUNCTION parameters at all. See Interpreter._call_frame.
 
 Not yet implemented (later milestone): file handling (M9).
 
@@ -208,10 +195,10 @@ def _with_article(type_name: str) -> str:
 
 
 class Symbol:
-    __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions", "is_alias")
+    __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions")
 
     def __init__(
-        self, data_type: str, value, is_constant: bool, is_array: bool = False, dimensions=None, is_alias: bool = False
+        self, data_type: str, value, is_constant: bool, is_array: bool = False, dimensions=None
     ):
         self.data_type = data_type
         self.value = value
@@ -220,12 +207,6 @@ class Symbol:
         # dimensions: list of (lower, upper) INTEGER pairs — one pair per
         # dimension — only meaningful when is_array is True.
         self.dimensions = dimensions
-        # True only for an ARRAY parameter's local Symbol (Milestone 8
-        # extension): it shares its .value dict with the caller's array
-        # rather than owning a fresh one, so _local_array_element_count
-        # must skip it when a call frame's elements are released -- that
-        # memory belongs to whichever DECLARE originally allocated it.
-        self.is_alias = is_alias
 
 
 class Interpreter:
@@ -783,10 +764,10 @@ class Interpreter:
         """Evaluate a CALL/function-call's argument expressions against the
         callable's declared parameter list (FR-10.2) and build the fresh
         local scope the call runs in. Arguments are matched to parameters by
-        position. A scalar argument is coerced exactly like an ordinary
-        assignment (so an INTEGER argument widens into a REAL parameter, and
-        so on) and passed by value; an ARRAY argument is instead passed by
-        reference -- see _bind_array_argument."""
+        position. Every parameter is scalar, so every argument is coerced
+        exactly like an ordinary assignment (so an INTEGER argument widens
+        into a REAL parameter, and so on) and passed by value -- arrays
+        cannot be passed as arguments at all (see the parser's _param)."""
         if len(arg_nodes) != len(params):
             want, got = len(params), len(arg_nodes)
             want_word = "parameter" if want == 1 else "parameters"
@@ -800,108 +781,13 @@ class Interpreter:
                     f"global CONSTANT '{param.name}'; choose a different parameter name.",
                 )
         local_scope = {}
-        for position, (param, arg_node) in enumerate(zip(params, arg_nodes), start=1):
-            if param.is_array:
-                local_scope[param.name] = self._bind_array_argument(name, kind, param, arg_node, position, call_line)
-                continue
+        for param, arg_node in zip(params, arg_nodes):
             value = self._eval(arg_node)
             value = self._coerce_for_type(
                 param.data_type, value, call_line, param.name, arg_node.column, arg_node.end_column
             )
             local_scope[param.name] = Symbol(param.data_type, value, is_constant=False)
         return local_scope
-
-    def _bind_array_argument(self, routine_name, kind, param, arg_node, position, call_line):
-        """Bind one ARRAY parameter (an extension beyond the SRS's literal
-        grammar, added on request -- see this module's and the parser's
-        docstrings).
-
-        An array argument must be a plain array name (arrays aren't
-        first-class expression values in this language, so there's nothing
-        else it could be), and is always passed BY REFERENCE: the returned
-        Symbol shares the caller's own storage dict rather than a copy, so
-        in-place mutation inside the callee -- sorting, filling, swapping
-        elements, ... -- is visible to the caller once the call returns.
-        That's what makes an array parameter actually useful for the classic
-        IGCSE tasks; a copy-in/copy-out array parameter would defeat the
-        point, and is why scalar parameters (passed by value, see
-        _bind_arguments) and array parameters behave differently here.
-
-        The parameter's declared element type and dimension count must
-        match the argument array's exactly (no widening -- the storage is
-        shared, not converted), and its declared bounds are re-evaluated
-        against the CALLER's scope at this call (consistent with how the
-        argument expressions themselves are evaluated) and checked against
-        the argument array's actual bounds.
-        """
-        if not isinstance(arg_node, ast.Identifier):
-            raise PseudocodeError(
-                call_line,
-                f"Argument {position} for {kind} '{routine_name}' must be a plain array name "
-                f"(parameter '{param.name}' is an ARRAY) -- an array can't be passed as the "
-                f"result of an expression.",
-                column=getattr(arg_node, "column", None),
-                end_column=getattr(arg_node, "end_column", None),
-            )
-        arg_symbol = self.symbols.get(arg_node.name)
-        if arg_symbol is None:
-            raise PseudocodeError(
-                call_line,
-                f"'{arg_node.name}' is used here but was never declared with DECLARE.",
-                column=arg_node.column,
-                end_column=arg_node.end_column,
-            )
-        if not arg_symbol.is_array:
-            raise PseudocodeError(
-                call_line,
-                f"'{arg_node.name}' is not an array, but parameter '{param.name}' of {kind} "
-                f"'{routine_name}' expects one.",
-                column=arg_node.column,
-                end_column=arg_node.end_column,
-            )
-        if arg_symbol.data_type != param.data_type:
-            raise PseudocodeError(
-                call_line,
-                f"'{arg_node.name}' is an ARRAY OF {arg_symbol.data_type}, but parameter "
-                f"'{param.name}' of {kind} '{routine_name}' is declared as ARRAY OF {param.data_type}.",
-                column=arg_node.column,
-                end_column=arg_node.end_column,
-            )
-        param_dimensions = []
-        for lower_node, upper_node in param.dimensions:
-            lower = self._expect_integer(
-                None, self._eval(lower_node), call_line, "An array parameter's lower bound"
-            )
-            upper = self._expect_integer(
-                None, self._eval(upper_node), call_line, "An array parameter's upper bound"
-            )
-            param_dimensions.append((lower, upper))
-        if len(param_dimensions) != len(arg_symbol.dimensions):
-            raise PseudocodeError(
-                call_line,
-                f"'{arg_node.name}' is a {len(arg_symbol.dimensions)}D array, but parameter "
-                f"'{param.name}' of {kind} '{routine_name}' is declared as a {len(param_dimensions)}D array.",
-                column=arg_node.column,
-                end_column=arg_node.end_column,
-            )
-        if param_dimensions != arg_symbol.dimensions:
-            want = ", ".join(f"{lo}:{hi}" for lo, hi in param_dimensions)
-            got = ", ".join(f"{lo}:{hi}" for lo, hi in arg_symbol.dimensions)
-            raise PseudocodeError(
-                call_line,
-                f"'{arg_node.name}' has bounds [{got}], but parameter '{param.name}' of {kind} "
-                f"'{routine_name}' is declared with bounds [{want}].",
-                column=arg_node.column,
-                end_column=arg_node.end_column,
-            )
-        return Symbol(
-            param.data_type,
-            arg_symbol.value,  # the SAME dict, not a copy -- see the docstring above
-            is_constant=False,
-            is_array=True,
-            dimensions=arg_symbol.dimensions,
-            is_alias=True,
-        )
 
     def _call_frame(self, body, params_scope):
         """Run a PROCEDURE/FUNCTION body in a fresh local scope and always
@@ -945,13 +831,12 @@ class Interpreter:
         can be released from the MAX_ARRAY_ELEMENTS budget once the call
         returns -- otherwise a function that DECLAREs an array and is called
         repeatedly (in a loop, or recursively) would eventually hit the cap
-        even though every earlier call's array is long gone. An aliased
-        ARRAY parameter (is_alias) is skipped: it shares storage with
-        whichever DECLARE originally allocated it, which is still very much
-        alive in the caller, so it must not be released here."""
+        even though every earlier call's array is long gone. Every array
+        Symbol in a local scope is one this call frame DECLAREd itself
+        (parameters are always scalar), so all of them are counted here."""
         total = 0
         for sym in scope.values():
-            if sym.is_array and not sym.is_alias:
+            if sym.is_array:
                 count = 1
                 for lower, upper in sym.dimensions:
                     count *= upper - lower + 1

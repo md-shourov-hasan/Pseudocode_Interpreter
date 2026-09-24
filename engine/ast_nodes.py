@@ -163,17 +163,11 @@ class WhileLoop:
 @dataclass
 class Param:
     """One `<identifier> : <data type>` entry in a PROCEDURE/FUNCTION
-    parameter list (FR-10.1, FR-10.3). Also covers an ARRAY parameter --
-    `<identifier> : ARRAY[<bounds>] OF <data type>` -- an extension
-    beyond the SRS's literal grammar (added on request); `is_array` and
-    `dimensions` then mirror ArrayDeclare's own fields (`dimensions` is a
-    list of (lower_expr, upper_expr) AST node pairs, re-evaluated against
-    the caller's scope at each call -- see Interpreter._bind_array_argument).
-    An array parameter is passed BY REFERENCE, unlike a scalar one."""
+    parameter list (FR-10.1, FR-10.3). A parameter is always scalar and
+    passed by value -- arrays cannot be passed as PROCEDURE/FUNCTION
+    parameters (see this file's module docstring)."""
     name: str
     data_type: str
-    is_array: bool = False
-    dimensions: list = None
 
 
 @dataclass
