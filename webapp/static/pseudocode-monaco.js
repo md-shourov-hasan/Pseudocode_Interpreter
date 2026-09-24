@@ -44,12 +44,15 @@ function buildCompletionEngine(lang, table) {
   const BOOLEANS = new Set(lang.booleanLiterals);
 
   // Keywords the grammar has, but the interpreter does not run yet (README
-  // milestones 8 and 9). They are still offered, ranked last and labelled.
-  const NOT_YET = new Set([
-    "OPENFILE", "READFILE", "WRITEFILE", "CLOSEFILE", "CALL", "PROCEDURE", "FUNCTION",
-  ]);
+  // milestone 9). They are still offered, ranked last and labelled.
+  const NOT_YET = new Set(["OPENFILE", "READFILE", "WRITEFILE", "CLOSEFILE"]);
+  // Always-valid statement starters, offered at the start of any line.
+  // PROCEDURE/FUNCTION are deliberately NOT here: the grammar only allows
+  // them at the very top of the program (see scanDefinitions), so offering
+  // them as an ordinary mid-program statement would just set the student up
+  // for a "must be at the top of the program" error from the real compiler.
   const STATEMENT_KEYWORDS = [
-    "DECLARE", "CONSTANT", "INPUT", "OUTPUT", "IF", "CASE", "FOR", "REPEAT", "WHILE",
+    "DECLARE", "CONSTANT", "INPUT", "OUTPUT", "IF", "CASE", "FOR", "REPEAT", "WHILE", "CALL",
   ];
   // After one of these, a new statement may follow on the same line.
   const STATEMENT_STARTERS = new Set(["THEN", "ELSE", "DO", "OTHERWISE", "REPEAT"]);
@@ -141,10 +144,120 @@ function buildCompletionEngine(lang, table) {
 
   // ---- declarations ------------------------------------------------------
   // name -> {name, kind: "var" | "const" | "array", type, bounds}
+  // Parses the "(<param>, ...)" clause starting at toks[start] (expected to
+  // be "(", the '(' right after a PROCEDURE/FUNCTION name). If there's no
+  // "(" there at all (a definition with no parameters, or one where the
+  // parameter list hasn't been typed yet), returns no params and leaves
+  // `next` at `start`. Shared by collectRoutines (which only needs
+  // name/type/isArray, for CALL/expression argument matching) and
+  // collectSymbols (which also wants `bounds`, to show a proper
+  // "ARRAY[1:10] OF INTEGER" detail for a parameter the same way a
+  // DECLAREd array gets one).
+  function parseParamClause(toks, start) {
+    const params = [];
+    // No "(" at all is a complete, paren-less header (a PROCEDURE/FUNCTION
+    // may have zero parameters) -- closed: true, distinct from a "(" that's
+    // been opened but not yet closed with ")" below.
+    if (!(toks[start] && toks[start].t === "(")) return { params, next: start, closed: true };
+    let j = start + 1;
+    while (toks[j] && toks[j].t !== ")" && toks[j].t !== "nl") {
+      if (toks[j].t !== "id") { j += 1; continue; }
+      const pname = toks[j].v;
+      let type = null;
+      let isArray = false;
+      let bounds = "";
+      const afterColon = toks[j + 1] && toks[j + 1].t === ":" ? toks[j + 2] : null;
+      if (afterColon && afterColon.t === "kw" && afterColon.v === "ARRAY") {
+        // ARRAY[...] OF <type> -- an extension beyond the SRS's literal
+        // grammar (parameters can carry arrays, passed by reference).
+        isArray = true;
+        let k = j + 3;
+        if (toks[k] && toks[k].t === "[") {
+          const boundsStart = k + 1;
+          let depth = 1;
+          k += 1;
+          while (toks[k] && depth > 0) {
+            if (toks[k].t === "[") depth += 1;
+            else if (toks[k].t === "]") depth -= 1;
+            k += 1;
+          }
+          bounds = toks.slice(boundsStart, k - 1).map((x) => x.v || (x.t === "assign" ? "<-" : x.t)).join("");
+        }
+        if (
+          toks[k] && toks[k].t === "kw" && toks[k].v === "OF" &&
+          toks[k + 1] && toks[k + 1].t === "kw" && TYPES.includes(toks[k + 1].v)
+        ) {
+          type = toks[k + 1].v;
+          k += 2;
+        }
+        j = k;
+      } else if (afterColon && afterColon.t === "kw" && TYPES.includes(afterColon.v)) {
+        type = afterColon.v;
+        j += 3;
+      } else {
+        j += 1;
+      }
+      params.push({ name: pname, type, isArray, bounds });
+    }
+    const closed = !!(toks[j] && toks[j].t === ")");
+    if (closed) j += 1;
+    return { params, next: j, closed };
+  }
+
+  // Symbols visible at the CURRENT position (the end of `toks`), following
+  // the interpreter's own Milestone 8 scoping rules (see interpreter.py's
+  // module docstring): outside any PROCEDURE/FUNCTION, this is the main
+  // program's own DECLAREs/CONSTANTs. Inside one, it's instead THAT
+  // definition's own parameters and its own local DECLAREs/CONSTANTs, plus
+  // (read-only) any CONSTANT declared at the top level -- a global
+  // *variable* is never visible inside a definition, and a definition's own
+  // locals are never visible outside it (or inside any other definition).
+  // PROCEDURE/FUNCTION frames never nest (see analyzeBlocks), so a single
+  // depth flag is enough to track "which scope is currently active", and
+  // each new definition starts with a completely fresh Map -- an earlier
+  // definition's locals are discarded the moment its ENDPROCEDURE/
+  // ENDFUNCTION is seen, exactly like a real call frame is.
   function collectSymbols(toks) {
-    const symbols = new Map();
+    const globalSymbols = new Map();
+    let localSymbols = null; // the routine's own scope, seeded as soon as its header is parsed
+    let bodyStart = Infinity; // token index where that scope actually becomes active
+    // Local scope activates at the start of the BODY, not at the PROCEDURE/
+    // FUNCTION keyword: a parameter's own array-bound expression is (like
+    // the interpreter's Interpreter._bind_array_argument) evaluated in the
+    // CALLER's scope, so a global variable must still resolve there even
+    // though it's textually between PROCEDURE and the body.
+    const activeScope = (i) => (localSymbols && i >= bodyStart ? localSymbols : globalSymbols);
+
     for (let i = 0; i < toks.length; i += 1) {
       const tk = toks[i];
+      if (tk.t === "kw" && (tk.v === "PROCEDURE" || tk.v === "FUNCTION")) {
+        const isFunction = tk.v === "FUNCTION";
+        localSymbols = new Map();
+        bodyStart = Infinity; // stays unreachable until the header below is fully parsed
+        const nameTok = toks[i + 1];
+        if (nameTok && nameTok.t === "id") {
+          const { params, next, closed } = parseParamClause(toks, i + 2);
+          for (const p of params) {
+            localSymbols.set(p.name, p.isArray
+              ? { name: p.name, kind: "array", type: p.type, bounds: p.bounds }
+              : { name: p.name, kind: "var", type: p.type });
+          }
+          if (closed) {
+            let headerEnd = next;
+            if (isFunction && toks[headerEnd] && toks[headerEnd].t === "kw" && toks[headerEnd].v === "RETURNS") {
+              headerEnd += 1;
+              if (toks[headerEnd] && toks[headerEnd].t === "kw" && TYPES.includes(toks[headerEnd].v)) headerEnd += 1;
+            }
+            bodyStart = headerEnd;
+          } // else: parameter list isn't closed yet, so bodyStart stays Infinity
+        }
+        continue;
+      }
+      if (tk.t === "kw" && (tk.v === "ENDPROCEDURE" || tk.v === "ENDFUNCTION")) {
+        localSymbols = null;
+        bodyStart = Infinity;
+        continue;
+      }
       if (tk.t === "kw" && tk.v === "DECLARE") {
         const names = [];
         let j = i + 1;
@@ -171,22 +284,27 @@ function buildCompletionEngine(lang, table) {
           const of = toks[j + 1];
           const type = toks[j + 2];
           if (of && of.t === "kw" && of.v === "OF" && type && type.t === "kw" && TYPES.includes(type.v)) {
-            for (const name of names) symbols.set(name, { name, kind: "array", type: type.v, bounds });
+            for (const name of names) activeScope(i).set(name, { name, kind: "array", type: type.v, bounds });
           }
         } else if (toks[j] && toks[j].t === "kw" && TYPES.includes(toks[j].v)) {
-          for (const name of names) symbols.set(name, { name, kind: "var", type: toks[j].v });
+          for (const name of names) activeScope(i).set(name, { name, kind: "var", type: toks[j].v });
         }
       } else if (tk.t === "kw" && tk.v === "CONSTANT") {
         const name = toks[i + 1];
         if (name && name.t === "id" && toks[i + 2] && toks[i + 2].t === "assign") {
           const value = toks[i + 3];
-          symbols.set(name.v, {
+          activeScope(i).set(name.v, {
             name: name.v, kind: "const", type: value && value.t === "lit" ? value.lit : null,
           });
         }
       }
     }
-    return symbols;
+
+    if (!(localSymbols && toks.length >= bodyStart)) return globalSymbols; // cursor is at the top level, or still inside a header
+    const visible = new Map();
+    for (const [name, sym] of globalSymbols) if (sym.kind === "const") visible.set(name, sym);
+    for (const [name, sym] of localSymbols) visible.set(name, sym); // locals may shadow a same-named global constant
+    return visible;
   }
 
   // ---- open blocks -------------------------------------------------------
@@ -247,10 +365,70 @@ function buildCompletionEngine(lang, table) {
           break;
         }
         case "ENDCASE": close("CASE"); break;
+        // PROCEDURE/FUNCTION never nest (the grammar only allows them at the
+        // very top of the program -- see scanDefinitions), so whenever one of
+        // these frames is present it is always the outermost, at stack[0].
+        case "PROCEDURE": stack.push({ type: "PROCEDURE" }); break;
+        case "ENDPROCEDURE": close("PROCEDURE"); break;
+        case "FUNCTION": stack.push({ type: "FUNCTION" }); break;
+        case "ENDFUNCTION": close("FUNCTION"); break;
         default: break;
       }
     }
     return { stack, pendingThen, pendingDo };
+  }
+
+  // Whether every top-level line up to here has itself been part of a
+  // PROCEDURE/FUNCTION definition (or blank) -- i.e. a PROCEDURE/FUNCTION
+  // keyword is still syntactically valid on the next line (SRS 3.10: "always
+  // defined at the top of the program"). Whether we're CURRENTLY inside an
+  // open definition (and which kind) is instead read directly off
+  // analyzeBlocks' stack (blocks.stack[0]) wherever that's needed, since a
+  // PROCEDURE/FUNCTION frame never nests and so is always the outermost one.
+  function atTopOfProgram(before) {
+    let atTop = true;
+    let openKind = null;
+    let atLineStart = true;
+    for (let i = 0; i < before.length; i += 1) {
+      const tk = before[i];
+      if (tk.t === "nl") { atLineStart = true; continue; }
+      if (!atLineStart) continue;
+      atLineStart = false;
+      if (openKind) {
+        const closes = openKind === "PROCEDURE" ? "ENDPROCEDURE" : "ENDFUNCTION";
+        if (tk.t === "kw" && tk.v === closes) openKind = null;
+        continue;
+      }
+      if (tk.t === "kw" && (tk.v === "PROCEDURE" || tk.v === "FUNCTION")) { openKind = tk.v; continue; }
+      atTop = false;
+    }
+    return atTop && !openKind;
+  }
+
+  // name -> {name, kind: "procedure" | "function", params: [{name, type, isArray}], returnType}
+  // A best-effort forward scan mirroring collectSymbols: partial/unfinished
+  // definitions (including the one currently being typed) simply end up with
+  // fewer/blank fields rather than being excluded, since that only makes a
+  // suggestion slightly less specific, never wrong.
+  function collectRoutines(toks) {
+    const routines = new Map();
+    for (let i = 0; i < toks.length; i += 1) {
+      const tk = toks[i];
+      if (!(tk.t === "kw" && (tk.v === "PROCEDURE" || tk.v === "FUNCTION"))) continue;
+      const isFunction = tk.v === "FUNCTION";
+      const nameTok = toks[i + 1];
+      if (!(nameTok && nameTok.t === "id")) continue;
+      const { params, next } = parseParamClause(toks, i + 2);
+      let returnType = null;
+      if (
+        isFunction && toks[next] && toks[next].t === "kw" && toks[next].v === "RETURNS" &&
+        toks[next + 1] && toks[next + 1].t === "kw" && TYPES.includes(toks[next + 1].v)
+      ) {
+        returnType = toks[next + 1].v;
+      }
+      routines.set(nameTok.v, { name: nameTok.v, kind: isFunction ? "function" : "procedure", params, returnType });
+    }
+    return routines;
   }
 
   // ---- current statement -------------------------------------------------
@@ -301,6 +479,16 @@ function buildCompletionEngine(lang, table) {
       group: "2",
       strong: true,
     };
+  }
+
+  function routineCandidate(r) {
+    const paramList = r.params
+      .map((p) => `${p.name}:${p.isArray ? `ARRAY OF ${p.type || "?"}` : (p.type || "?")}`)
+      .join(", ");
+    const detail = r.kind === "function"
+      ? `FUNCTION(${paramList}) RETURNS ${r.returnType || "?"}`
+      : `PROCEDURE(${paramList})`;
+    return { label: r.name, kind: "function", detail, group: "2", strong: true };
   }
 
   const typeCandidates = (withArray) =>
@@ -366,7 +554,7 @@ function buildCompletionEngine(lang, table) {
   }
 
   // ---- per-statement contexts ---------------------------------------------
-  function startOfStatement(lineStart, blocks, symbols) {
+  function startOfStatement(lineStart, blocks, symbols, atTop) {
     const out = [];
     if (lineStart) {
       // "THEN" and "DO" may sit on the line after their IF / WHILE header.
@@ -388,6 +576,17 @@ function buildCompletionEngine(lang, table) {
       } else if (top && top.type === "FOR") out.push(keyword("NEXT", "0"));
       else if (top && top.type === "WHILE") out.push(keyword("ENDWHILE", "0"));
       else if (top && top.type === "REPEAT") out.push(keyword("UNTIL", "0"));
+      else if (top && top.type === "PROCEDURE") out.push(keyword("ENDPROCEDURE", "0"));
+      else if (top && top.type === "FUNCTION") out.push(keyword("ENDFUNCTION", "0"));
+      // PROCEDURE/FUNCTION (FR-10.1, FR-10.3) are only valid here, at the
+      // very top of the program, with no other block currently open.
+      if (atTop && blocks.stack.length === 0) {
+        out.push(keyword("PROCEDURE", "1"), keyword("FUNCTION", "1"));
+      }
+      // RETURN (FR-10.3) is only valid inside a FUNCTION body, never a
+      // PROCEDURE body or the main program. A PROCEDURE/FUNCTION frame never
+      // nests, so it's always stack[0] when one is open at all.
+      if (blocks.stack[0] && blocks.stack[0].type === "FUNCTION") out.push(keyword("RETURN", "1"));
     }
     for (const word of STATEMENT_KEYWORDS) out.push(keyword(word, "1"));
     for (const word of NOT_YET) out.push(keyword(word, "9"));
@@ -430,7 +629,109 @@ function buildCompletionEngine(lang, table) {
     return expression(stmt.slice(step + 1), "numeric", {}, symbols);
   }
 
-  function statementContext(stmt, blocks, symbols) {
+  // A PROCEDURE/FUNCTION header line, from the keyword itself up to (and
+  // including) RETURNS <type> for a FUNCTION: <id> ( <id> : <type>, ...)
+  // [RETURNS <type>]. A parameter's type may itself be ARRAY[...] OF <type>
+  // (an extension beyond the SRS's literal grammar, added on request) --
+  // that clause is handled exactly like declareContext handles a DECLARE's
+  // array type, just scoped to the CURRENT parameter's own clause (a header
+  // can have several parameters, each with its own colon and, potentially,
+  // its own array brackets), plus RETURNS for a FUNCTION.
+  function routineHeaderContext(stmt, isFunction, symbols) {
+    const lparen = stmt.findIndex((tk) => tk.t === "(");
+    if (lparen < 0) {
+      // No '(' yet: either about to type one, or (a FUNCTION with no
+      // parameters) RETURNS follows the name directly.
+      return stmt.length === 2 && stmt[1].t === "id" && isFunction ? [keyword("RETURNS", "0", true)] : [];
+    }
+    const rest = stmt.slice(lparen + 1);
+    let depth = 1;
+    let closeIndex = -1;
+    for (let k = 0; k < rest.length; k += 1) {
+      if (rest[k].t === "(" || rest[k].t === "[") depth += 1;
+      else if (rest[k].t === ")" || rest[k].t === "]") {
+        depth -= 1;
+        if (depth === 0) { closeIndex = k; break; }
+      }
+    }
+    if (closeIndex >= 0) {
+      // The parameter list has already been closed (possibly empty, "()").
+      const afterClose = rest.slice(closeIndex + 1);
+      if (afterClose.length === 0) return isFunction ? [keyword("RETURNS", "0", true)] : [];
+      const last = afterClose[afterClose.length - 1];
+      if (isFunction && last && last.t === "kw" && last.v === "RETURNS") return typeCandidates(false);
+      return [];
+    }
+    // Still inside the (unclosed) parameter list: find where the CURRENT
+    // parameter's own clause starts -- right after the last top-level comma
+    // (or the very start, for the first parameter).
+    let clauseStart = 0;
+    let d = 0;
+    for (let k = 0; k < rest.length; k += 1) {
+      const tk = rest[k];
+      if (tk.t === "(" || tk.t === "[") d += 1;
+      else if (tk.t === ")" || tk.t === "]") d -= 1;
+      else if (tk.t === "," && d === 0) clauseStart = k + 1;
+    }
+    const clause = rest.slice(clauseStart);
+    const colon = clause.findIndex((tk) => tk.t === ":");
+    if (colon < 0) return []; // naming the parameter itself: nothing to suggest
+    const after = clause.slice(colon + 1);
+    if (after.length === 0) return typeCandidates(true);
+    if (after[0].t === "kw" && after[0].v === "ARRAY") {
+      const of = after.findIndex((tk) => tk.t === "kw" && tk.v === "OF");
+      if (of >= 0) return of === after.length - 1 ? typeCandidates(false) : [];
+      if (after.length === 1 || after[1].t !== "[") return [];
+      let bd = 0;
+      for (const tk of after) {
+        if (tk.t === "[") bd += 1;
+        else if (tk.t === "]") bd -= 1;
+      }
+      if (bd > 0) return expression(after.slice(1), "numeric", {}, symbols); // inside the bounds
+      return [keyword("OF", "0", true)];
+    }
+    return []; // typing the data type itself: nothing further to suggest
+  }
+
+  // CALL <identifier> [(<args>)]   (FR-10.2). Only PROCEDUREs are offered as
+  // the name, never FUNCTIONs (FR-10.4: CALLing one is a compiler error), and
+  // once inside the parens, each argument is matched to that PROCEDURE's
+  // declared parameter type exactly like a built-in call's arguments are.
+  function callContext(stmt, routines, symbols) {
+    if (stmt.length === 1) {
+      const out = [];
+      for (const r of routines.values()) if (r.kind === "procedure") out.push(routineCandidate(r));
+      return out;
+    }
+    const nameTok = stmt[1];
+    if (!(nameTok && nameTok.t === "id")) return [];
+    if (!(stmt[2] && stmt[2].t === "(")) return []; // no parens (yet): nothing more to suggest
+    const inner = stmt.slice(3);
+    let depth = 0;
+    let argIndex = 0;
+    let sliceStart = 0;
+    for (let k = 0; k < inner.length; k += 1) {
+      const tk = inner[k];
+      if (tk.t === "(" || tk.t === "[") depth += 1;
+      else if (tk.t === ")" || tk.t === "]") depth -= 1;
+      else if (tk.t === "," && depth === 0) { argIndex += 1; sliceStart = k + 1; }
+    }
+    const routine = routines.get(nameTok.v);
+    const param = routine && routine.params[argIndex];
+    if (param && param.isArray) {
+      // An array argument must be a plain array name of matching element
+      // type (FR-10.2 extension -- see Interpreter._bind_array_argument);
+      // the shared expression machinery is expression-oriented and doesn't
+      // fit here, so array names are suggested directly instead.
+      const out = [];
+      for (const sym of symbols.values()) if (sym.kind === "array" && sym.type === param.type) out.push(symbolCandidate(sym));
+      return out;
+    }
+    const argType = param && param.type ? (CATEGORY[param.type] || "any") : "any";
+    return expression(inner.slice(sliceStart), argType, {}, symbols);
+  }
+
+  function statementContext(stmt, blocks, symbols, routines) {
     const first = stmt[0];
     if (first.t === "id") {
       const assign = stmt.findIndex((tk) => tk.t === "assign");
@@ -475,6 +776,10 @@ function buildCompletionEngine(lang, table) {
         }
         return [];
       }
+      case "PROCEDURE": return routineHeaderContext(stmt, false, symbols);
+      case "FUNCTION": return routineHeaderContext(stmt, true, symbols);
+      case "CALL": return callContext(stmt, routines, symbols);
+      case "RETURN": return expression(rest, "any", { logic: true }, symbols);
       default: return [];
     }
   }
@@ -489,10 +794,11 @@ function buildCompletionEngine(lang, table) {
     const before = toks.slice(0, lastNewline + 1);
     const line = toks.slice(lastNewline + 1);
     const symbols = collectSymbols(toks);
+    const routines = collectRoutines(toks);
     const blocks = analyzeBlocks(before);
     const stmt = currentStatement(line);
-    if (stmt.length === 0) return startOfStatement(line.length === 0, blocks, symbols);
-    return statementContext(stmt, blocks, symbols);
+    if (stmt.length === 0) return startOfStatement(line.length === 0, blocks, symbols, atTopOfProgram(before));
+    return statementContext(stmt, blocks, symbols, routines);
   }
 
   return { candidates, tokenize };

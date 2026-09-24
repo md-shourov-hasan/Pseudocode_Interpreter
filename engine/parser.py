@@ -1,12 +1,13 @@
 """
-Parser for the IGCSE Pseudocode Compiler (Milestone 2).
+Parser for the IGCSE Pseudocode Compiler (Milestone 2, extended through
+Milestone 8).
 
 Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
 
-    program     := (statement? NEWLINE)* EOF
+    program     := (procedure_decl | function_decl)* (statement? NEWLINE)* EOF  -- FR-10.1, FR-10.3
     statement   := declare_stmt | constant_stmt | input_stmt | output_stmt
                  | if_stmt | case_stmt | for_stmt | repeat_stmt | while_stmt
-                 | assignment_stmt
+                 | call_stmt | return_stmt | assignment_stmt
 
     declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON
                        ( data_type | array_type )
@@ -26,6 +27,15 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     assignment_stmt:= ( IDENTIFIER | IDENTIFIER '[' arglist ']' ) ASSIGN expression  -- FR-8.2, FR-8.4
     data_type      := INTEGER | REAL | CHAR | STRING | BOOLEAN
 
+    procedure_decl := PROCEDURE IDENTIFIER ( '(' param_list? ')' )?
+                       block ENDPROCEDURE                                   -- FR-10.1
+    function_decl  := FUNCTION IDENTIFIER ( '(' param_list? ')' )?
+                       RETURNS data_type block ENDFUNCTION                  -- FR-10.3
+    param_list     := param ( ',' param )*
+    param          := IDENTIFIER ':' ( data_type | array_type )       -- array_type: extension, see below
+    call_stmt      := CALL IDENTIFIER ( '(' arglist? ')' )?                 -- FR-10.2
+    return_stmt    := RETURN expression                                    -- FR-10.3, only inside a FUNCTION
+
     expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
     or_expr     := and_expr ( OR and_expr )*
     and_expr    := not_expr ( AND not_expr )*
@@ -43,8 +53,26 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
 
 Arrays are limited to 1 or 2 dimensions (FR-8.1, FR-8.3); a bound can
 be any expression (e.g. a CONSTANT), evaluated when the DECLARE runs.
-Procedures/functions (Milestone 8) and file handling (Milestone 9)
-remain unimplemented.
+
+PROCEDURE/FUNCTION definitions are recognised ONLY in the leading run of
+the program, before the first ordinary statement (SRS 3.10: "always
+defined at the top of the program") -- see `parse()`. A PROCEDURE or
+FUNCTION token reached anywhere else (mid-program, or nested inside
+another block/definition) is reported as a placement error by
+`_statement()` rather than being parsed as a nested definition, since
+nesting isn't part of the grammar either. `Call` (the expression node)
+is reused for user-defined FUNCTION calls, exactly as it already is for
+built-ins -- only the interpreter needs to tell them apart.
+
+An ARRAY parameter (`param := IDENTIFIER ':' array_type` above) is an
+extension beyond the SRS's literal `<par n> : <data type>` grammar,
+added on request; it reuses the exact same `ARRAY[...] OF <data type>`
+syntax as a DECLARE (see `_array_type_tail`, shared by both), so there's
+only one ARRAY syntax in the language. See Interpreter._bind_array_argument
+for how it's passed (by reference, unlike a scalar parameter) and how its
+declared bounds are checked against the caller's argument array.
+
+File handling (Milestone 9) remains unimplemented.
 """
 
 from .tokens import Token, TokenType
@@ -91,6 +119,8 @@ _STATEMENT_KEYWORDS = frozenset(
         TokenType.FOR,
         TokenType.REPEAT,
         TokenType.WHILE,
+        TokenType.CALL,
+        TokenType.RETURN,
     }
 )
 
@@ -102,6 +132,8 @@ _CLOSER_BELONGS_TO = {
     TokenType.ENDWHILE: TokenType.WHILE,
     TokenType.OTHERWISE: TokenType.CASE,
     TokenType.ENDCASE: TokenType.CASE,
+    TokenType.ENDPROCEDURE: TokenType.PROCEDURE,
+    TokenType.ENDFUNCTION: TokenType.FUNCTION,
 }
 
 
@@ -109,9 +141,14 @@ class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.pos = 0
-        # Kinds of block (IF / FOR / WHILE / REPEAT / CASE) whose body is being
-        # parsed right now, outermost first.
+        # Kinds of block (IF / FOR / WHILE / REPEAT / CASE / PROCEDURE /
+        # FUNCTION) whose body is being parsed right now, outermost first.
         self._open_blocks: list[TokenType] = []
+        # PROCEDURE/FUNCTION currently being parsed, outermost first (in
+        # practice at most one deep, since definitions can't nest -- see
+        # the module docstring). Lets a RETURN statement (FR-10.3) check
+        # it's inside a FUNCTION, not a PROCEDURE or the main program.
+        self._callable_context: list[TokenType] = []
 
     # ---- token helpers -----------------------------------------------
 
@@ -143,8 +180,23 @@ class Parser:
     # ---- program / statements ------------------------------------------
 
     def parse(self) -> ast.Program:
+        # PROCEDURE/FUNCTION definitions (FR-10.1, FR-10.3) are only
+        # recognised in this leading run, before the first ordinary
+        # statement (SRS 3.10). Once any other statement has been seen --
+        # including one before the very first definition -- a later
+        # PROCEDURE/FUNCTION token is a placement error, reported by
+        # _statement() below rather than parsed as a definition.
+        self._skip_newlines()
+        declarations = []
+        while self._peek().type in (TokenType.PROCEDURE, TokenType.FUNCTION):
+            if self._peek().type == TokenType.PROCEDURE:
+                declarations.append(self._procedure_decl())
+            else:
+                declarations.append(self._function_decl())
+            self._end_of_statement()
+            self._skip_newlines()
         statements = self._block(stop_types=frozenset())
-        return ast.Program(statements)
+        return ast.Program(declarations + statements)
 
     def _skip_newlines(self):
         while self._match(TokenType.NEWLINE):
@@ -227,19 +279,30 @@ class Parser:
             return self._repeat_statement()
         if tok.type == TokenType.WHILE:
             return self._while_statement()
+        if tok.type == TokenType.CALL:
+            return self._call_statement()
+        if tok.type == TokenType.RETURN:
+            return self._return_statement()
         if tok.type == TokenType.IDENTIFIER:
             return self._assignment_statement()
+
+        if tok.type in (TokenType.PROCEDURE, TokenType.FUNCTION):
+            # Reached from inside _statement() rather than the leading scan
+            # in parse(), which means either an ordinary statement already
+            # came before it, or it's nested inside another block/definition
+            # -- neither is allowed (SRS 3.10, FR-10.1/FR-10.3).
+            keyword = "PROCEDURE" if tok.type == TokenType.PROCEDURE else "FUNCTION"
+            raise PseudocodeError(
+                tok.line,
+                f"A {keyword} definition must be at the top of the program, before any other "
+                f"statement, and cannot be nested inside another PROCEDURE or FUNCTION.",
+            )
+
         unsupported = {
             TokenType.OPENFILE: "File handling statements are not supported yet.",
             TokenType.READFILE: "File handling statements are not supported yet.",
             TokenType.WRITEFILE: "File handling statements are not supported yet.",
             TokenType.CLOSEFILE: "File handling statements are not supported yet.",
-            TokenType.PROCEDURE: "Procedures are not supported yet.",
-            TokenType.ENDPROCEDURE: "Procedures are not supported yet.",
-            TokenType.FUNCTION: "Functions are not supported yet.",
-            TokenType.ENDFUNCTION: "Functions are not supported yet.",
-            TokenType.CALL: "User-defined procedure/function calls are not supported yet.",
-            TokenType.RETURN: "RETURN is only valid inside a user-defined function, which is not supported yet.",
         }
         if tok.type in unsupported:
             raise PseudocodeError(tok.line, unsupported[tok.type])
@@ -251,6 +314,8 @@ class Parser:
             TokenType.UNTIL: "UNTIL does not have a matching REPEAT statement.",
             TokenType.ENDWHILE: "ENDWHILE does not have a matching WHILE statement.",
             TokenType.ENDCASE: "ENDCASE does not have a matching CASE OF statement.",
+            TokenType.ENDPROCEDURE: "ENDPROCEDURE does not have a matching PROCEDURE statement.",
+            TokenType.ENDFUNCTION: "ENDFUNCTION does not have a matching FUNCTION statement.",
         }
         if tok.type in unexpected_endings:
             raise PseudocodeError(tok.line, unexpected_endings[tok.type])
@@ -280,10 +345,12 @@ class Parser:
         self._advance()
         return ast.Declare(names, _DATA_TYPE_TOKENS[type_tok.type], line)
 
-    def _array_declare_tail(self, names, line):
-        """The ARRAY[...] OF <type> part of a DECLARE, after the
-        identifier list and ':' have already been consumed.
-        (FR-8.1, FR-8.3)"""
+    def _array_type_tail(self, line):
+        """The ARRAY[...] OF <type> part shared by a DECLARE (FR-8.1,
+        FR-8.3) and an array PROCEDURE/FUNCTION parameter (an extension
+        beyond the SRS's literal grammar, added on request -- see the
+        module docstring and _param below). Assumes ARRAY is the next
+        token. Returns (dimensions, element_type)."""
         self._advance()  # consume ARRAY
         self._expect(TokenType.LBRACKET, "Expected '[' after ARRAY")
         dimensions = [self._array_bound_pair()]
@@ -299,10 +366,17 @@ class Parser:
             raise PseudocodeError(
                 type_tok.line,
                 f"Expected a data type (INTEGER, REAL, CHAR, STRING, or BOOLEAN), "
-                f"but found '{type_tok.lexeme or type_tok.type.name}'.",
+                f"but found {describe_token(type_tok)}.",
             )
         self._advance()
-        return ast.ArrayDeclare(names, dimensions, _DATA_TYPE_TOKENS[type_tok.type], line)
+        return dimensions, _DATA_TYPE_TOKENS[type_tok.type]
+
+    def _array_declare_tail(self, names, line):
+        """The ARRAY[...] OF <type> part of a DECLARE, after the
+        identifier list and ':' have already been consumed.
+        (FR-8.1, FR-8.3)"""
+        dimensions, element_type = self._array_type_tail(line)
+        return ast.ArrayDeclare(names, dimensions, element_type, line)
 
     def _array_bound_pair(self):
         lower = self._expression()
@@ -388,6 +462,125 @@ class Parser:
         self._open_blocks.pop()
         self._advance()  # consume ENDWHILE
         return ast.WhileLoop(condition, body, line)
+
+    # ---- procedures / functions (FR-10.1 - FR-10.4) ---------------------
+
+    def _param_list(self):
+        """<param> (',' <param>)*, the contents of a PROCEDURE/FUNCTION's
+        parameter parentheses (already known to be non-empty by the caller)."""
+        params = [self._param()]
+        while self._match(TokenType.COMMA):
+            params.append(self._param())
+        return params
+
+    def _param(self):
+        """<identifier> ':' <data type> -- one parameter (FR-10.1, FR-10.3).
+        Also accepts an ARRAY parameter (<identifier> ':' ARRAY[...] OF
+        <data type>) -- an extension beyond the SRS's literal grammar,
+        added on request; see ast_nodes.Param and
+        Interpreter._bind_array_argument for how it's passed (by
+        reference, unlike a scalar parameter)."""
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected a parameter name")
+        self._expect(TokenType.COLON, "Expected ':' after the parameter name")
+        if self._check(TokenType.ARRAY):
+            dimensions, element_type = self._array_type_tail(name_tok.line)
+            return ast.Param(name_tok.lexeme, element_type, is_array=True, dimensions=dimensions)
+        type_tok = self._peek()
+        if type_tok.type not in _DATA_TYPE_TOKENS:
+            raise PseudocodeError(
+                type_tok.line,
+                f"Expected a data type (INTEGER, REAL, CHAR, STRING, BOOLEAN, or ARRAY) for "
+                f"parameter '{name_tok.lexeme}', but found {describe_token(type_tok)}.",
+            )
+        self._advance()
+        return ast.Param(name_tok.lexeme, _DATA_TYPE_TOKENS[type_tok.type])
+
+    def _parse_param_clause(self, owner_name: str):
+        """The optional '(' <param_list> ')' shared by PROCEDURE and
+        FUNCTION headers. Returns [] when there is no parameter list at all."""
+        if not self._match(TokenType.LPAREN):
+            return []
+        params = [] if self._check(TokenType.RPAREN) else self._param_list()
+        self._expect(TokenType.RPAREN, "Expected ')' to close the parameter list")
+        seen = set()
+        for p in params:
+            if p.name in seen:
+                raise PseudocodeError(
+                    self._peek().line,
+                    f"Parameter '{p.name}' is repeated in the parameter list for '{owner_name}'.",
+                )
+            seen.add(p.name)
+        return params
+
+    def _procedure_decl(self):
+        """PROCEDURE <identifier> [(<params>)] ... ENDPROCEDURE   (FR-10.1)"""
+        line = self._advance().line  # consume PROCEDURE
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected a name after PROCEDURE")
+        params = self._parse_param_clause(name_tok.lexeme)
+        self._open_blocks.append(TokenType.PROCEDURE)
+        self._callable_context.append(TokenType.PROCEDURE)
+        body = self._block(frozenset({TokenType.ENDPROCEDURE}))
+        if not self._check(TokenType.ENDPROCEDURE):
+            raise self._missing_end(line, "PROCEDURE", "ENDPROCEDURE")
+        self._callable_context.pop()
+        self._open_blocks.pop()
+        self._advance()  # consume ENDPROCEDURE
+        return ast.ProcedureDecl(name_tok.lexeme, params, body, line)
+
+    def _function_decl(self):
+        """FUNCTION <identifier> [(<params>)] RETURNS <data type> ...
+        ENDFUNCTION   (FR-10.3)"""
+        line = self._advance().line  # consume FUNCTION
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected a name after FUNCTION")
+        params = self._parse_param_clause(name_tok.lexeme)
+        self._expect(TokenType.RETURNS, "Expected RETURNS after the function's name/parameters")
+        type_tok = self._peek()
+        if type_tok.type not in _DATA_TYPE_TOKENS:
+            raise PseudocodeError(
+                type_tok.line,
+                f"Expected a data type (INTEGER, REAL, CHAR, STRING, or BOOLEAN) after RETURNS, "
+                f"but found {describe_token(type_tok)}.",
+            )
+        self._advance()
+        return_type = _DATA_TYPE_TOKENS[type_tok.type]
+        self._open_blocks.append(TokenType.FUNCTION)
+        self._callable_context.append(TokenType.FUNCTION)
+        body = self._block(frozenset({TokenType.ENDFUNCTION}))
+        if not self._check(TokenType.ENDFUNCTION):
+            raise self._missing_end(line, "FUNCTION", "ENDFUNCTION")
+        self._callable_context.pop()
+        self._open_blocks.pop()
+        self._advance()  # consume ENDFUNCTION
+        return ast.FunctionDecl(name_tok.lexeme, params, return_type, body, line)
+
+    def _call_statement(self):
+        """CALL <identifier> or CALL <identifier>(<val1>, ...)   (FR-10.2)"""
+        line = self._advance().line  # consume CALL
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected a procedure name after CALL")
+        args = []
+        if self._match(TokenType.LPAREN):
+            if not self._check(TokenType.RPAREN):
+                args.append(self._expression())
+                while self._match(TokenType.COMMA):
+                    args.append(self._expression())
+            self._expect(TokenType.RPAREN, f"Expected ')' to close the call to {name_tok.lexeme}")
+        return ast.ProcedureCall(name_tok.lexeme, args, line)
+
+    def _return_statement(self):
+        """RETURN <expression>   (FR-10.3) -- only valid inside a FUNCTION;
+        checked structurally here rather than left to the interpreter, since
+        it's purely a question of where in the source this token sits."""
+        line = self._advance().line  # consume RETURN
+        if not self._callable_context:
+            raise PseudocodeError(line, "RETURN is only valid inside a user-defined FUNCTION.")
+        if self._callable_context[-1] != TokenType.FUNCTION:
+            raise PseudocodeError(
+                line,
+                "RETURN cannot be used inside a PROCEDURE, only inside a FUNCTION -- "
+                "a PROCEDURE does not return a value.",
+            )
+        value = self._expression()
+        return ast.Return(value, line)
 
     def _if_statement(self):
         """IF <condition> [NEWLINE] THEN [NEWLINE] <block> [ELSE [NEWLINE] <block>] ENDIF   (FR-7.1, FR-7.2)"""

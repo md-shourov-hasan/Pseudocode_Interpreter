@@ -6,15 +6,24 @@ Kept as plain dataclasses with no behaviour — the interpreter (Milestone
 errors can be reported against the original source line (NFR-10).
 
 Node coverage: Program, Declare, ArrayDeclare, Constant, Input, Output,
-If, Case, Assignment, ForLoop, RepeatLoop, WhileLoop (statements —
-added across Milestones 2, 5, 6, 7), and Literal, Identifier, UnaryOp,
-BinaryOp, Call, Index (expressions — added in Milestone 2; Index is
-also used as an Assignment target as of Milestone 7).
+If, Case, Assignment, ForLoop, RepeatLoop, WhileLoop, ProcedureDecl,
+FunctionDecl, ProcedureCall, Return (statements — added across
+Milestones 2, 5, 6, 7, 8), and Literal, Identifier, UnaryOp, BinaryOp,
+Call, Index (expressions — added in Milestone 2; Index is also used as
+an Assignment target as of Milestone 7).
 
-Call and Index are parsed now (they're pure syntax: `name(...)` /
-`name[...]`) but not yet given meaning — built-in functions arrive in
-Milestone 4, array semantics in Milestone 7, user procedures/functions
-in Milestone 8.
+Call is parsed as pure syntax (`name(...)`) from Milestone 2 onward,
+but is given meaning gradually: built-in functions in Milestone 4, and
+user-defined FUNCTION calls in Milestone 8 (Call.name is looked up
+against both namespaces at interpretation time — see
+Interpreter._eval_call). Index is likewise pure syntax until array
+semantics arrive in Milestone 7.
+
+ProcedureDecl/FunctionDecl (FR-10.1, FR-10.3) are parsed only at the
+very top of a program, before any other statement — see the parser's
+module docstring. ProcedureCall (FR-10.2) is the `CALL <identifier>
+(...)` statement form; a FUNCTION is instead invoked through the
+ordinary Call expression node above, per FR-10.4.
 """
 
 from dataclasses import dataclass, field
@@ -148,6 +157,65 @@ class WhileLoop:
     the condition is tested before every iteration, including the first."""
     condition: object
     body: list
+    line: int
+
+
+@dataclass
+class Param:
+    """One `<identifier> : <data type>` entry in a PROCEDURE/FUNCTION
+    parameter list (FR-10.1, FR-10.3). Also covers an ARRAY parameter --
+    `<identifier> : ARRAY[<bounds>] OF <data type>` -- an extension
+    beyond the SRS's literal grammar (added on request); `is_array` and
+    `dimensions` then mirror ArrayDeclare's own fields (`dimensions` is a
+    list of (lower_expr, upper_expr) AST node pairs, re-evaluated against
+    the caller's scope at each call -- see Interpreter._bind_array_argument).
+    An array parameter is passed BY REFERENCE, unlike a scalar one."""
+    name: str
+    data_type: str
+    is_array: bool = False
+    dimensions: list = None
+
+
+@dataclass
+class ProcedureDecl:
+    """PROCEDURE <identifier> [(<param> (',' <param>)*)] ... ENDPROCEDURE
+    (FR-10.1). Only ever appears at the top of Program.statements — the
+    parser accepts PROCEDURE/FUNCTION definitions solely before the
+    first ordinary statement (SRS 3.10: "always defined at the top of
+    the program")."""
+    name: str
+    params: list  # list[Param]
+    body: list
+    line: int
+
+
+@dataclass
+class FunctionDecl:
+    """FUNCTION <identifier> [(<param> (',' <param>)*)] RETURNS <data type>
+    ... ENDFUNCTION (FR-10.3). Placement rules mirror ProcedureDecl."""
+    name: str
+    params: list  # list[Param]
+    return_type: str
+    body: list
+    line: int
+
+
+@dataclass
+class ProcedureCall:
+    """CALL <identifier> or CALL <identifier>(<val1>, ...)   (FR-10.2).
+    A statement, unlike a FUNCTION call, which is the `Call` expression
+    node below used inside an expression (FR-10.4)."""
+    name: str
+    args: list
+    line: int
+
+
+@dataclass
+class Return:
+    """RETURN <expression>   (FR-10.3). Only valid inside a FUNCTION
+    body — enforced structurally by the parser, which tracks whether it
+    is currently inside a PROCEDURE or a FUNCTION."""
+    value: object
     line: int
 
 

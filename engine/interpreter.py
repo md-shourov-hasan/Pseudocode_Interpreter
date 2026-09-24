@@ -38,6 +38,17 @@ Implements:
     FR-8.2        1D array element assignment: <id>[<index>] <- <value>
     FR-8.3        2D array DECLARE: ARRAY[<lr>:<ur>, <lc>:<uc>] OF <type>
     FR-8.4        2D array element assignment: <id>[<row>, <col>] <- <value>
+    FR-10.1       PROCEDURE <identifier> [(<params>)] ... ENDPROCEDURE
+    FR-10.2       CALL <identifier> [(<args>)] -- substitutes and runs
+    FR-10.3       FUNCTION <identifier> [(<params>)] RETURNS <type> ...
+                  ENDFUNCTION; RETURN <expr> supplies its one value
+    FR-10.4       A FUNCTION can only be invoked from within an
+                  expression, never with CALL (checked in _exec_call
+                  and _eval_call respectively)
+    (ext)         ARRAY parameters for PROCEDURE/FUNCTION, passed by
+                  reference -- added on request, beyond the SRS's
+                  literal <par n> : <data type> grammar (see
+                  _bind_array_argument)
     (ext)         AND / OR / NOT boolean connectives in conditions,
                   requested beyond the reference syntax guide
 
@@ -49,8 +60,27 @@ Two deliberate deviations from strict type-mismatch behaviour
   - OUTPUT of a REAL value is rounded to at most 5 decimal places,
     with insignificant trailing zeros trimmed.
 
-Not yet implemented (later milestones): procedures/functions (M8),
-file handling (M9).
+Milestone 8 scoping decision (the SRS doesn't specify variable scope
+rules): each PROCEDURE/FUNCTION call runs in its own fresh local
+scope containing only its parameters and whatever it DECLAREs itself.
+Global variables from the main program are NOT visible inside a
+procedure/function body -- but global CONSTANTs are, since they're
+read-only and so carry none of the aliasing/mutation risk a shared
+global variable would. A scalar parameter is passed by value, like an
+ordinary assignment (REAL/INTEGER narrowing and widening apply the
+same way). See Interpreter._call_frame.
+
+Array parameters (an extension beyond the SRS's literal grammar, added
+on request) are the one deliberate exception to "passed by value": an
+ARRAY parameter is passed BY REFERENCE -- the callee's local Symbol
+shares the caller's own storage dict, so in-place mutation (sorting,
+filling, swapping elements, ...) is visible to the caller once the call
+returns. This is what makes an array parameter actually useful for the
+classic IGCSE tasks (BubbleSort, FillArray, LinearSearch, ...); a
+copy-in/copy-out array parameter would defeat the point. See
+Interpreter._bind_array_argument.
+
+Not yet implemented (later milestone): file handling (M9).
 
 Array storage note: each array's elements live in a plain dict keyed
 by index tuple (e.g. (3,) for 1D, (2, 5) for 2D), eagerly filled with
@@ -74,6 +104,7 @@ student-facing ``PseudocodeError`` when the limit is exceeded.
 
 import math
 import random
+import sys
 import time
 from decimal import ROUND_HALF_UP, Context, Decimal
 
@@ -135,6 +166,41 @@ _PYTHON_TYPES_FOR = {
 # counted across all of its arrays.
 MAX_ARRAY_ELEMENTS = 1_000_000
 
+# A tree-walking call to a PROCEDURE/FUNCTION consumes several *Python* stack
+# frames per level of pseudocode call nesting, so unbounded recursion would
+# eventually hit Python's own recursion limit and raise a raw RecursionError
+# rather than a clear pseudocode-level message. This cap is generous for any
+# realistic student program (including recursive ones) while still catching
+# "recursive call with no base case" well before Python's own limit -- see
+# Interpreter._call_frame.
+MAX_CALL_DEPTH = 200
+
+# One level of pseudocode call nesting costs several real Python stack
+# frames in this tree-walking design (statement dispatch, expression
+# evaluation, argument binding, ...). Python's *own* default recursion
+# limit (1000) would otherwise be reached well before MAX_CALL_DEPTH, which
+# would surface as a generic runtime error instead of the clear message
+# above. Interpreter.run() raises the limit for the duration of one run so
+# MAX_CALL_DEPTH is always what actually stops runaway recursion; the
+# multiplier is a generous over-estimate of frames-per-level so it stays
+# safe even if a future change adds a few more calls to the chain.
+_FRAMES_PER_CALL_ESTIMATE = 40
+
+
+class _ReturnSignal(Exception):
+    """Internal control-flow signal for RETURN (FR-10.3).
+
+    Never surfaced to the user: always caught by the FUNCTION call whose
+    body is currently executing (Interpreter._call_frame). If it were ever
+    to escape all the way to Interpreter.run() -- which shouldn't happen,
+    since the parser only accepts RETURN inside a FUNCTION body -- it would
+    still be caught by run()'s own safety net and reported as a generic
+    runtime error rather than leaking a raw traceback.
+    """
+
+    def __init__(self, value):
+        self.value = value
+
 
 def _with_article(type_name: str) -> str:
     """'an INTEGER', 'a REAL' -- so messages never say 'a INTEGER'."""
@@ -142,9 +208,11 @@ def _with_article(type_name: str) -> str:
 
 
 class Symbol:
-    __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions")
+    __slots__ = ("data_type", "value", "is_constant", "is_array", "dimensions", "is_alias")
 
-    def __init__(self, data_type: str, value, is_constant: bool, is_array: bool = False, dimensions=None):
+    def __init__(
+        self, data_type: str, value, is_constant: bool, is_array: bool = False, dimensions=None, is_alias: bool = False
+    ):
         self.data_type = data_type
         self.value = value
         self.is_constant = is_constant
@@ -152,6 +220,12 @@ class Symbol:
         # dimensions: list of (lower, upper) INTEGER pairs — one pair per
         # dimension — only meaningful when is_array is True.
         self.dimensions = dimensions
+        # True only for an ARRAY parameter's local Symbol (Milestone 8
+        # extension): it shares its .value dict with the caller's array
+        # rather than owning a fresh one, so _local_array_element_count
+        # must skip it when a call frame's elements are released -- that
+        # memory belongs to whichever DECLARE originally allocated it.
+        self.is_alias = is_alias
 
 
 class Interpreter:
@@ -164,6 +238,14 @@ class Interpreter:
                    lines into self.output (and also printing them).
         """
         self.symbols: dict[str, Symbol] = {}
+        # A stable handle to the top-level scope, kept even while `self.symbols`
+        # is temporarily swapped out for a PROCEDURE/FUNCTION call's local scope
+        # (see _call_frame). Used only to read global CONSTANTs into a new call
+        # frame -- see the Milestone 8 scoping note in this module's docstring.
+        self._global_scope = self.symbols
+        self.procedures: dict[str, "ast.ProcedureDecl"] = {}
+        self.functions: dict[str, "ast.FunctionDecl"] = {}
+        self._call_depth = 0
         self.output: list[str] = []
         self._input_fn = input_fn if input_fn is not None else input
         self._output_fn = output_fn if output_fn is not None else self.output.append
@@ -184,16 +266,34 @@ class Interpreter:
 
     def run(self, program: ast.Program) -> list[str]:
         self._execution_started_at = time.monotonic()
+        # See _FRAMES_PER_CALL_ESTIMATE: raised only for the duration of this
+        # run, and always restored, so it never leaks into other interpreter
+        # instances (e.g. other requests handled by the same web process).
+        old_recursion_limit = sys.getrecursionlimit()
+        needed_limit = MAX_CALL_DEPTH * _FRAMES_PER_CALL_ESTIMATE + 200
+        if needed_limit > old_recursion_limit:
+            sys.setrecursionlimit(needed_limit)
         try:
             for stmt in program.statements:
                 self._exec_statement(stmt)
             return self.output
         except PseudocodeError:
             raise
+        except RecursionError:
+            # Safety net: MAX_CALL_DEPTH should always fire first (see
+            # _FRAMES_PER_CALL_ESTIMATE), but a clear message here costs
+            # nothing if some other, non-PROCEDURE/FUNCTION recursive path
+            # (e.g. Python's own machinery) ever reaches Python's limit.
+            raise PseudocodeError(
+                self._current_line,
+                "The program ran out of stack space, most likely from unbounded recursion.",
+            ) from None
         except Exception as exc:
             # Milestone 10 safety net: implementation-level exceptions must
             # never leak through the public interpreter API.
             raise normalize_unexpected_error(self._current_line, exc) from None
+        finally:
+            sys.setrecursionlimit(old_recursion_limit)
 
     def _check_execution_timeout(self, line=None):
         """Raise a language-level timeout once the configured run limit is exceeded."""
@@ -611,6 +711,256 @@ class Interpreter:
             return isinstance(case_value, bool) and isinstance(subject_value, bool) and case_value == subject_value
         return case_value == subject_value
 
+    # ---- procedures / functions (FR-10.1 - FR-10.4) -----------------------
+    #
+    # ProcedureDecl/FunctionDecl statements only ever appear at the very
+    # front of Program.statements (the parser enforces this -- see its module
+    # docstring), so both run and register their callable before the main
+    # program's own statements execute, which is what lets two procedures/
+    # functions call each other (including a function calling itself)
+    # regardless of which one is written first.
+
+    def _exec_procedure_decl(self, stmt: ast.ProcedureDecl):
+        self._register_callable(stmt.name, "PROCEDURE", stmt.line)
+        self.procedures[stmt.name] = stmt
+
+    def _exec_function_decl(self, stmt: ast.FunctionDecl):
+        self._register_callable(stmt.name, "FUNCTION", stmt.line)
+        self.functions[stmt.name] = stmt
+
+    def _register_callable(self, name, kind, line):
+        """PROCEDURE/FUNCTION names share one namespace with each other and
+        with the built-in library functions (BUILTIN_FUNCTIONS), separate
+        from ordinary variables/constants."""
+        if name in BUILTIN_FUNCTIONS:
+            raise PseudocodeError(
+                line, f"'{name}' is already the name of a built-in function and can't be used for a {kind}."
+            )
+        if name in self.procedures or name in self.functions:
+            raise PseudocodeError(line, f"'{name}' has already been defined as a PROCEDURE or FUNCTION.")
+
+    def _exec_procedure_call(self, stmt: ast.ProcedureCall):
+        """CALL <identifier> [(<args>)]   (FR-10.2)"""
+        name = stmt.name
+        if name in BUILTIN_FUNCTIONS:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is a built-in function, not a PROCEDURE, so it can't be used with CALL. "
+                f"Built-ins are used directly in an expression instead, e.g. OUTPUT {name}(...).",
+            )
+        if name in self.functions:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is a FUNCTION, not a PROCEDURE. A FUNCTION can only be called as part "
+                f"of an expression, e.g. OUTPUT {name}(...), never with CALL.",
+            )
+        proc = self.procedures.get(name)
+        if proc is None:
+            raise PseudocodeError(
+                stmt.line, f"'{name}' is used here but no PROCEDURE with that name was defined."
+            )
+        local_scope = self._bind_arguments(name, "PROCEDURE", proc.params, stmt.args, stmt.line)
+        self._call_frame(proc.body, local_scope)
+
+    def _call_function(self, name, arg_nodes, line, column, end_column):
+        """Evaluate a call to a user-defined FUNCTION from within an
+        expression (FR-10.3, FR-10.4). Called from _eval_call, which has
+        already confirmed `name` isn't a built-in or a PROCEDURE."""
+        func = self.functions[name]
+        local_scope = self._bind_arguments(name, "FUNCTION", func.params, arg_nodes, line)
+        result = self._call_frame(func.body, local_scope)
+        if result is None:
+            raise PseudocodeError(
+                line,
+                f"FUNCTION '{name}' finished without executing a RETURN statement; a FUNCTION "
+                f"must return exactly one {func.return_type} value.",
+                column=column,
+                end_column=end_column,
+            )
+        return self._coerce_for_type(func.return_type, result, line, f"{name}'s return value", column, end_column)
+
+    def _bind_arguments(self, name, kind, params, arg_nodes, call_line):
+        """Evaluate a CALL/function-call's argument expressions against the
+        callable's declared parameter list (FR-10.2) and build the fresh
+        local scope the call runs in. Arguments are matched to parameters by
+        position. A scalar argument is coerced exactly like an ordinary
+        assignment (so an INTEGER argument widens into a REAL parameter, and
+        so on) and passed by value; an ARRAY argument is instead passed by
+        reference -- see _bind_array_argument."""
+        if len(arg_nodes) != len(params):
+            want, got = len(params), len(arg_nodes)
+            want_word = "parameter" if want == 1 else "parameters"
+            raise PseudocodeError(call_line, f"{kind} '{name}' expects {want} {want_word}, but got {got}.")
+        for param in params:
+            existing = self._global_scope.get(param.name)
+            if existing is not None and existing.is_constant:
+                raise PseudocodeError(
+                    call_line,
+                    f"Parameter '{param.name}' in {kind} '{name}' has the same name as the "
+                    f"global CONSTANT '{param.name}'; choose a different parameter name.",
+                )
+        local_scope = {}
+        for position, (param, arg_node) in enumerate(zip(params, arg_nodes), start=1):
+            if param.is_array:
+                local_scope[param.name] = self._bind_array_argument(name, kind, param, arg_node, position, call_line)
+                continue
+            value = self._eval(arg_node)
+            value = self._coerce_for_type(
+                param.data_type, value, call_line, param.name, arg_node.column, arg_node.end_column
+            )
+            local_scope[param.name] = Symbol(param.data_type, value, is_constant=False)
+        return local_scope
+
+    def _bind_array_argument(self, routine_name, kind, param, arg_node, position, call_line):
+        """Bind one ARRAY parameter (an extension beyond the SRS's literal
+        grammar, added on request -- see this module's and the parser's
+        docstrings).
+
+        An array argument must be a plain array name (arrays aren't
+        first-class expression values in this language, so there's nothing
+        else it could be), and is always passed BY REFERENCE: the returned
+        Symbol shares the caller's own storage dict rather than a copy, so
+        in-place mutation inside the callee -- sorting, filling, swapping
+        elements, ... -- is visible to the caller once the call returns.
+        That's what makes an array parameter actually useful for the classic
+        IGCSE tasks; a copy-in/copy-out array parameter would defeat the
+        point, and is why scalar parameters (passed by value, see
+        _bind_arguments) and array parameters behave differently here.
+
+        The parameter's declared element type and dimension count must
+        match the argument array's exactly (no widening -- the storage is
+        shared, not converted), and its declared bounds are re-evaluated
+        against the CALLER's scope at this call (consistent with how the
+        argument expressions themselves are evaluated) and checked against
+        the argument array's actual bounds.
+        """
+        if not isinstance(arg_node, ast.Identifier):
+            raise PseudocodeError(
+                call_line,
+                f"Argument {position} for {kind} '{routine_name}' must be a plain array name "
+                f"(parameter '{param.name}' is an ARRAY) -- an array can't be passed as the "
+                f"result of an expression.",
+                column=getattr(arg_node, "column", None),
+                end_column=getattr(arg_node, "end_column", None),
+            )
+        arg_symbol = self.symbols.get(arg_node.name)
+        if arg_symbol is None:
+            raise PseudocodeError(
+                call_line,
+                f"'{arg_node.name}' is used here but was never declared with DECLARE.",
+                column=arg_node.column,
+                end_column=arg_node.end_column,
+            )
+        if not arg_symbol.is_array:
+            raise PseudocodeError(
+                call_line,
+                f"'{arg_node.name}' is not an array, but parameter '{param.name}' of {kind} "
+                f"'{routine_name}' expects one.",
+                column=arg_node.column,
+                end_column=arg_node.end_column,
+            )
+        if arg_symbol.data_type != param.data_type:
+            raise PseudocodeError(
+                call_line,
+                f"'{arg_node.name}' is an ARRAY OF {arg_symbol.data_type}, but parameter "
+                f"'{param.name}' of {kind} '{routine_name}' is declared as ARRAY OF {param.data_type}.",
+                column=arg_node.column,
+                end_column=arg_node.end_column,
+            )
+        param_dimensions = []
+        for lower_node, upper_node in param.dimensions:
+            lower = self._expect_integer(
+                None, self._eval(lower_node), call_line, "An array parameter's lower bound"
+            )
+            upper = self._expect_integer(
+                None, self._eval(upper_node), call_line, "An array parameter's upper bound"
+            )
+            param_dimensions.append((lower, upper))
+        if len(param_dimensions) != len(arg_symbol.dimensions):
+            raise PseudocodeError(
+                call_line,
+                f"'{arg_node.name}' is a {len(arg_symbol.dimensions)}D array, but parameter "
+                f"'{param.name}' of {kind} '{routine_name}' is declared as a {len(param_dimensions)}D array.",
+                column=arg_node.column,
+                end_column=arg_node.end_column,
+            )
+        if param_dimensions != arg_symbol.dimensions:
+            want = ", ".join(f"{lo}:{hi}" for lo, hi in param_dimensions)
+            got = ", ".join(f"{lo}:{hi}" for lo, hi in arg_symbol.dimensions)
+            raise PseudocodeError(
+                call_line,
+                f"'{arg_node.name}' has bounds [{got}], but parameter '{param.name}' of {kind} "
+                f"'{routine_name}' is declared with bounds [{want}].",
+                column=arg_node.column,
+                end_column=arg_node.end_column,
+            )
+        return Symbol(
+            param.data_type,
+            arg_symbol.value,  # the SAME dict, not a copy -- see the docstring above
+            is_constant=False,
+            is_array=True,
+            dimensions=arg_symbol.dimensions,
+            is_alias=True,
+        )
+
+    def _call_frame(self, body, params_scope):
+        """Run a PROCEDURE/FUNCTION body in a fresh local scope and always
+        restore the caller's scope afterwards, whether the body finishes
+        normally, hits RETURN, or raises. Returns the RETURNed value, or
+        None if the body ran off the end without one (a PROCEDURE always
+        does; a FUNCTION doing so is reported by the caller -- see
+        _call_function).
+
+        Milestone 8 scoping decision (see this module's docstring): the new
+        scope starts with the caller's global CONSTANTs (read-only, so safe
+        to share) plus this call's own parameters -- nothing else from the
+        caller's scope carries over, matching how procedures/functions are
+        otherwise self-contained in the reference syntax guide's examples.
+        """
+        if self._call_depth >= MAX_CALL_DEPTH:
+            raise PseudocodeError(
+                self._current_line,
+                f"Too many nested or recursive PROCEDURE/FUNCTION calls (limit: {MAX_CALL_DEPTH}). "
+                f"This usually means a recursive call is missing its base case.",
+            )
+        local_scope = {name: sym for name, sym in self._global_scope.items() if sym.is_constant}
+        local_scope.update(params_scope)
+        caller_scope = self.symbols
+        self.symbols = local_scope
+        self._call_depth += 1
+        try:
+            for s in body:
+                self._exec_statement(s)
+            return None
+        except _ReturnSignal as signal:
+            return signal.value
+        finally:
+            self._call_depth -= 1
+            self._array_elements -= self._local_array_element_count(local_scope)
+            self.symbols = caller_scope
+
+    @staticmethod
+    def _local_array_element_count(scope) -> int:
+        """How many array elements a call frame's local scope OWNS, so they
+        can be released from the MAX_ARRAY_ELEMENTS budget once the call
+        returns -- otherwise a function that DECLAREs an array and is called
+        repeatedly (in a loop, or recursively) would eventually hit the cap
+        even though every earlier call's array is long gone. An aliased
+        ARRAY parameter (is_alias) is skipped: it shares storage with
+        whichever DECLARE originally allocated it, which is still very much
+        alive in the caller, so it must not be released here."""
+        total = 0
+        for sym in scope.values():
+            if sym.is_array and not sym.is_alias:
+                count = 1
+                for lower, upper in sym.dimensions:
+                    count *= upper - lower + 1
+                total += count
+        return total
+
+    def _exec_return(self, stmt: ast.Return):
+        raise _ReturnSignal(self._eval(stmt.value))
+
     # ---- expression evaluation --------------------------------------------
 
     def _eval(self, node):
@@ -779,17 +1129,30 @@ class Interpreter:
             )
 
     def _eval_call(self, node: ast.Call):
+        """name(arg1, ...) -- a built-in (FR-4.3 etc.) or user-defined
+        FUNCTION call (FR-10.3). A FUNCTION is only ever invoked this way,
+        as part of an expression, per FR-10.4; CALLing one is rejected in
+        _exec_procedure_call instead."""
         name = node.name
-        if name not in BUILTIN_FUNCTIONS:
+        if name in BUILTIN_FUNCTIONS:
+            args = [self._eval(a) for a in node.args]
+            return self._BUILTIN_HANDLERS[name](self, args, node.line)
+        if name in self.procedures:
             raise PseudocodeError(
                 node.line,
-                f"'{name}(...)' isn't a recognized built-in function, and user-defined "
-                f"procedures/functions aren't supported yet — coming in a later milestone.",
+                f"'{name}' is a PROCEDURE, not a FUNCTION, so it can't be used in an expression. "
+                f"Use CALL {name}(...) as its own statement instead.",
                 column=node.column,
                 end_column=node.end_column,
             )
-        args = [self._eval(a) for a in node.args]
-        return self._BUILTIN_HANDLERS[name](self, args, node.line)
+        if name not in self.functions:
+            raise PseudocodeError(
+                node.line,
+                f"'{name}(...)' isn't a recognized built-in or user-defined function.",
+                column=node.column,
+                end_column=node.end_column,
+            )
+        return self._call_function(name, node.args, node.line, node.column, node.end_column)
 
     # ---- library functions (FR-4.3, FR-4.4, FR-5.2, FR-5.3, FR-5.5-5.8) ---
 
@@ -1055,6 +1418,10 @@ Interpreter._STATEMENT_HANDLERS = {
     ast.ForLoop: Interpreter._exec_for,
     ast.RepeatLoop: Interpreter._exec_repeat,
     ast.WhileLoop: Interpreter._exec_while,
+    ast.ProcedureDecl: Interpreter._exec_procedure_decl,
+    ast.FunctionDecl: Interpreter._exec_function_decl,
+    ast.ProcedureCall: Interpreter._exec_procedure_call,
+    ast.Return: Interpreter._exec_return,
 }
 
 Interpreter._EXPR_HANDLERS = {
