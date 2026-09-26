@@ -31,14 +31,14 @@ from dataclasses import dataclass, field
 
 # ---- Program -------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class Program:
     statements: list
 
 
 # ---- Statements (Milestone 2 subset) --------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class Declare:
     """DECLARE <identifier list> : <data type>   (FR-3.1, extended to
     allow multiple comma-separated identifiers sharing one data type,
@@ -49,7 +49,7 @@ class Declare:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ArrayDeclare:
     """DECLARE <identifier list> : ARRAY[<l>:<u>] OF <data type>   (FR-8.1)
     or the 2D form ARRAY[<lr>:<ur>, <lc>:<uc>] OF <data type>   (FR-8.3).
@@ -66,7 +66,7 @@ class ArrayDeclare:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Constant:
     """CONSTANT <identifier> <- <value>   (FR-3.2)"""
     identifier: str
@@ -74,7 +74,7 @@ class Constant:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Input:
     """INPUT <identifier>   (FR-4.1), or INPUT <identifier>[<index>...]
     to read directly into an array element.
@@ -86,14 +86,14 @@ class Input:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Output:
     """OUTPUT <value(s)>, comma-separated   (FR-4.2)"""
     values: list
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class If:
     """IF <condition> THEN ... [ELSE ...] ENDIF   (FR-7.1, FR-7.2)"""
     condition: object
@@ -102,7 +102,7 @@ class If:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Case:
     """CASE OF <identifier> ... [OTHERWISE ...] ENDCASE   (FR-7.3, FR-7.4)
 
@@ -116,7 +116,7 @@ class Case:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Assignment:
     """<identifier> <- <value>   (FR-3.3), or <identifier>[<index>...] <- <value>
     for an array element (FR-8.2, FR-8.4).
@@ -129,7 +129,7 @@ class Assignment:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ForLoop:
     """FOR <identifier> <- <start> TO <finish> [STEP <step>] ... NEXT <identifier>
     (FR-6.1, FR-6.2, FR-6.3). `step` is None when no STEP clause was
@@ -142,7 +142,7 @@ class ForLoop:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class RepeatLoop:
     """REPEAT ... UNTIL <condition>   (FR-6.4) — post-conditional: the
     body always runs at least once, then stops once condition is TRUE."""
@@ -151,7 +151,7 @@ class RepeatLoop:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class WhileLoop:
     """WHILE <condition> DO ... ENDWHILE   (FR-6.5) — pre-conditional:
     the condition is tested before every iteration, including the first."""
@@ -160,7 +160,7 @@ class WhileLoop:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Param:
     """One `<identifier> : <data type>` entry in a PROCEDURE/FUNCTION
     parameter list (FR-10.1, FR-10.3). A parameter is always scalar and
@@ -170,7 +170,7 @@ class Param:
     data_type: str
 
 
-@dataclass
+@dataclass(slots=True)
 class ProcedureDecl:
     """PROCEDURE <identifier> [(<param> (',' <param>)*)] ... ENDPROCEDURE
     (FR-10.1). Only ever appears at the top of Program.statements — the
@@ -183,7 +183,7 @@ class ProcedureDecl:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class FunctionDecl:
     """FUNCTION <identifier> [(<param> (',' <param>)*)] RETURNS <data type>
     ... ENDFUNCTION (FR-10.3). Placement rules mirror ProcedureDecl."""
@@ -194,7 +194,7 @@ class FunctionDecl:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ProcedureCall:
     """CALL <identifier> or CALL <identifier>(<val1>, ...)   (FR-10.2).
     A statement, unlike a FUNCTION call, which is the `Call` expression
@@ -204,7 +204,7 @@ class ProcedureCall:
     line: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Return:
     """RETURN <expression>   (FR-10.3). Only valid inside a FUNCTION
     body — enforced structurally by the parser, which tracks whether it
@@ -224,7 +224,7 @@ class Return:
 # see engine/errors.py. They play no role in evaluation.
 
 
-@dataclass
+@dataclass(slots=True)
 class Literal:
     value: object     # the Python value: int / float / str / bool
     data_type: str    # "INTEGER" | "REAL" | "CHAR" | "STRING" | "BOOLEAN"
@@ -233,7 +233,7 @@ class Literal:
     end_column: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Identifier:
     name: str
     line: int
@@ -241,7 +241,7 @@ class Identifier:
     end_column: int
 
 
-@dataclass
+@dataclass(slots=True)
 class UnaryOp:
     op: str           # "-" | "NOT"
     operand: object
@@ -250,7 +250,7 @@ class UnaryOp:
     end_column: int
 
 
-@dataclass
+@dataclass(slots=True)
 class BinaryOp:
     op: str           # "+" "-" "*" "/" "^" "=" "<" "<=" ">" ">=" "<>" "AND" "OR"
     left: object
@@ -260,7 +260,7 @@ class BinaryOp:
     end_column: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Call:
     """name(arg1, arg2, ...) — a built-in or user function call."""
     name: str
@@ -270,7 +270,7 @@ class Call:
     end_column: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Index:
     """name[idx1] or name[idx1, idx2] — 1D/2D array element access."""
     name: str

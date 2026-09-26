@@ -173,6 +173,13 @@ MAX_CALL_DEPTH = 200
 # safe even if a future change adds a few more calls to the chain.
 _FRAMES_PER_CALL_ESTIMATE = 40
 
+# How many _check_execution_timeout() calls happen between actual clock
+# reads (see that method). 256 keeps the worst-case overshoot on any
+# realistic program imperceptible (a few hundred extra tree-walking steps)
+# while cutting the number of time.monotonic() calls in a hot loop by the
+# same factor.
+_TIMEOUT_CHECK_INTERVAL = 256
+
 
 class _ReturnSignal(Exception):
     """Internal control-flow signal for RETURN (FR-10.3).
@@ -224,6 +231,13 @@ class Interpreter:
         # (see _call_frame). Used only to read global CONSTANTs into a new call
         # frame -- see the Milestone 8 scoping note in this module's docstring.
         self._global_scope = self.symbols
+        # Mirrors the CONSTANT-only subset of `_global_scope`, kept up to date
+        # incrementally by `_exec_constant`. `_call_frame` needs exactly this
+        # subset on every single PROCEDURE/FUNCTION call (see the Milestone 8
+        # scoping note below), so maintaining it here avoids re-scanning every
+        # global symbol -- constants and ordinary variables alike -- on each
+        # call.
+        self._global_constants: dict[str, Symbol] = {}
         self.procedures: dict[str, "ast.ProcedureDecl"] = {}
         self.functions: dict[str, "ast.FunctionDecl"] = {}
         self._call_depth = 0
@@ -234,6 +248,7 @@ class Interpreter:
         self._array_elements = 0  # elements allocated so far, across all arrays
         self._max_execution_seconds = max_execution_seconds
         self._execution_started_at = None
+        self._timeout_check_counter = 0
         if max_execution_seconds is not None:
             if (
                 not isinstance(max_execution_seconds, (int, float))
@@ -247,6 +262,7 @@ class Interpreter:
 
     def run(self, program: ast.Program) -> list[str]:
         self._execution_started_at = time.monotonic()
+        self._timeout_check_counter = 0
         # See _FRAMES_PER_CALL_ESTIMATE: raised only for the duration of this
         # run, and always restored, so it never leaks into other interpreter
         # instances (e.g. other requests handled by the same web process).
@@ -277,9 +293,22 @@ class Interpreter:
             sys.setrecursionlimit(old_recursion_limit)
 
     def _check_execution_timeout(self, line=None):
-        """Raise a language-level timeout once the configured run limit is exceeded."""
+        """Raise a language-level timeout once the configured run limit is exceeded.
+
+        Called on every statement and every loop iteration, so in a tight
+        loop this can run millions of times; actually reading the clock
+        (time.monotonic()) is comparatively expensive to do that often. Since
+        the limit is a "possible infinite loop" safety net rather than a
+        precise deadline, it's checked for real only once every
+        _TIMEOUT_CHECK_INTERVAL calls -- bounding how late the timeout can
+        fire by a negligible, constant amount of extra work, while avoiding a
+        clock read on most calls."""
         if self._max_execution_seconds is None or self._execution_started_at is None:
             return
+        self._timeout_check_counter += 1
+        if self._timeout_check_counter < _TIMEOUT_CHECK_INTERVAL:
+            return
+        self._timeout_check_counter = 0
         if time.monotonic() - self._execution_started_at >= self._max_execution_seconds:
             error_line = line if line is not None else self._current_line
             seconds = f"{self._max_execution_seconds:g}"
@@ -291,12 +320,18 @@ class Interpreter:
     # ---- statement execution --------------------------------------------
 
     def _exec_statement(self, stmt):
-        self._check_execution_timeout(getattr(stmt, "line", 0))
-        self._current_line = getattr(stmt, "line", 0)
+        # Every AST node is guaranteed to carry `line` (see ast_nodes.py's
+        # module docstring), so a plain attribute access is used instead of
+        # getattr(..., 0) here -- this runs for every statement executed,
+        # including every pass through a loop body, so it's worth not paying
+        # for a needless default lookup on the hottest path in the
+        # interpreter.
+        self._check_execution_timeout(stmt.line)
+        self._current_line = stmt.line
         handler = self._STATEMENT_HANDLERS.get(type(stmt))
         if handler is None:
             raise PseudocodeError(
-                getattr(stmt, "line", 0),
+                stmt.line,
                 "This statement is not supported yet.",
             )
         handler(self, stmt)
@@ -393,7 +428,15 @@ class Interpreter:
             )
         value = self._eval(stmt.value)
         data_type = self._infer_type(value, stmt.line, stmt.identifier)
-        self.symbols[stmt.identifier] = Symbol(data_type, value, is_constant=True)
+        symbol = Symbol(data_type, value, is_constant=True)
+        self.symbols[stmt.identifier] = symbol
+        # CONSTANT is also allowed inside a PROCEDURE/FUNCTION body (it's an
+        # ordinary statement per the grammar), where it belongs only to that
+        # call's own local scope -- NOT to the global CONSTANTs every call
+        # frame inherits (see _call_frame). Only mirror it into the cached
+        # global-constants view when we're actually declaring at global scope.
+        if self.symbols is self._global_scope:
+            self._global_constants[stmt.identifier] = symbol
 
     def _exec_assignment(self, stmt: ast.Assignment):
         if isinstance(stmt.target, ast.Index):
@@ -809,7 +852,7 @@ class Interpreter:
                 f"Too many nested or recursive PROCEDURE/FUNCTION calls (limit: {MAX_CALL_DEPTH}). "
                 f"This usually means a recursive call is missing its base case.",
             )
-        local_scope = {name: sym for name, sym in self._global_scope.items() if sym.is_constant}
+        local_scope = dict(self._global_constants)
         local_scope.update(params_scope)
         caller_scope = self.symbols
         self.symbols = local_scope
@@ -849,11 +892,14 @@ class Interpreter:
     # ---- expression evaluation --------------------------------------------
 
     def _eval(self, node):
-        self._current_line = getattr(node, "line", self._current_line)
+        # Same reasoning as _exec_statement above: every expression node
+        # always has `line`, and this is called for every subexpression of
+        # every statement evaluated.
+        self._current_line = node.line
         method = self._EXPR_HANDLERS.get(type(node))
         if method is None:
             raise PseudocodeError(
-                getattr(node, "line", 0),
+                node.line,
                 "This expression is not supported yet.",
             )
         return method(self, node)
