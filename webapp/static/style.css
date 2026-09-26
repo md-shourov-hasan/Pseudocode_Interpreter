@@ -54,14 +54,20 @@ body {
 
 .brand {
   display: flex;
-  align-items: baseline;
+  align-items: center; /* Changed baseline to center for proper vertical alignment */
   gap: 10px;
 }
 
 .brand-mark {
-  font-family: var(--font-code);
-  color: var(--accent);
-  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Add img selector here to restrict the actual image */
+.brand-mark img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
 }
 
 .brand-name {
