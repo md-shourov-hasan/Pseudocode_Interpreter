@@ -37,6 +37,20 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/health")
+def health():
+    """Lightweight endpoint the parent SudoLab site polls to detect when
+    this Render service has finished waking up from a cold start."""
+    resp = jsonify({"status": "ok"})
+    # Explicit CORS header: this route is fetched cross-origin from the
+    # SudoLab site while this app itself is still asleep/booting, so it
+    # must not depend on any session or app-level auth.
+    resp.headers["Access-Control-Allow-Origin"] = os.environ.get(
+        "SUDOLAB_ORIGIN", "*"
+    )
+    return resp, 200
+
+
 @app.route("/api/run", methods=["POST"])
 def start_run():
     data = request.get_json(silent=True) or {}
