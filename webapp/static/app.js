@@ -132,6 +132,22 @@ if (typeof window.require !== "function") {
       appendError(null, "Couldn't initialize the pseudocode editor.");
       setStatus("error", "Editor error");
     }
+
+    // The editor's font (JetBrains Mono) loads asynchronously over the
+    // network (see the Google Fonts <link> in index.html). Monaco measures
+    // each character's pixel width up front to place the cursor and lay out
+    // text, and if that measurement happens before the web font has finished
+    // loading, it's measuring the browser's fallback font instead. When
+    // JetBrains Mono then swaps in with (very slightly) different character
+    // widths, Monaco keeps using its now-stale measurement, so the cursor's
+    // computed pixel position drifts further from the real glyph edges with
+    // every character typed. document.fonts.ready resolves once every font
+    // the page actually used has finished loading, so this reliably fires
+    // once, right after the swap, and remeasureFonts() clears the stale
+    // cache so cursor placement lines up with the real font from then on.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => monaco.editor.remeasureFonts());
+    }
   });
 }
 

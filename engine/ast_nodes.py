@@ -7,10 +7,19 @@ errors can be reported against the original source line (NFR-10).
 
 Node coverage: Program, Declare, ArrayDeclare, Constant, Input, Output,
 If, Case, Assignment, ForLoop, RepeatLoop, WhileLoop, ProcedureDecl,
-FunctionDecl, ProcedureCall, Return (statements — added across
-Milestones 2, 5, 6, 7, 8), and Literal, Identifier, UnaryOp, BinaryOp,
-Call, Index (expressions — added in Milestone 2; Index is also used as
-an Assignment target as of Milestone 7).
+FunctionDecl, ProcedureCall, Return, OpenFile, ReadFile, WriteFile,
+CloseFile (statements — added across Milestones 2, 5, 6, 7, 8, 9), and
+Literal, Identifier, UnaryOp, BinaryOp, Call, Index (expressions —
+added in Milestone 2; Index is also used as an Assignment target as of
+Milestone 7).
+
+OpenFile/ReadFile/WriteFile/CloseFile (FR-9.1 - FR-9.4) each carry a
+`file_expr` expression node rather than a bare string, since the SRS's
+`<file identifier>` is written as a plain quoted STRING in every
+example (`OPENFILE "Names.txt" FOR READ`) but nothing in the grammar
+stops it from being a STRING/CHAR variable instead — the interpreter
+evaluates `file_expr` at runtime and uses its STRING value as the
+file's name (see Interpreter._eval_file_identifier).
 
 Call is parsed as pure syntax (`name(...)`) from Milestone 2 onward,
 but is given meaning gradually: built-in functions in Milestone 4, and
@@ -210,6 +219,46 @@ class Return:
     body — enforced structurally by the parser, which tracks whether it
     is currently inside a PROCEDURE or a FUNCTION."""
     value: object
+    line: int
+
+
+# ---- File handling (FR-9.1 - FR-9.4) --------------------------------------
+
+@dataclass(slots=True)
+class OpenFile:
+    """OPENFILE <file identifier> FOR <file mode>   (FR-9.1). `mode` is
+    "READ" or "WRITE" — a file can only be open in one mode at a time."""
+    file_expr: object
+    mode: str
+    line: int
+
+
+@dataclass(slots=True)
+class ReadFile:
+    """READFILE <file identifier>, <identifier>   (FR-9.2). Reads one
+    line from a file opened FOR READ into `target` (an Identifier —
+    the SRS's grammar names a plain identifier here, not an array
+    element)."""
+    file_expr: object
+    target: object
+    line: int
+
+
+@dataclass(slots=True)
+class WriteFile:
+    """WRITEFILE <file identifier>, <value>   (FR-9.3). Writes `value`
+    to a file opened FOR WRITE. The SRS's own example passes a bare
+    identifier here; `value` is a general expression so a literal or
+    computed value works the same way OUTPUT's values do."""
+    file_expr: object
+    value: object
+    line: int
+
+
+@dataclass(slots=True)
+class CloseFile:
+    """CLOSEFILE <file identifier>   (FR-9.4)."""
+    file_expr: object
     line: int
 
 

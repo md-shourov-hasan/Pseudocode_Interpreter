@@ -77,7 +77,11 @@ Pseudocode_Interpreter/
 │   ├── test_arrays.py                1D and 2D array declaration, indexing, bounds checking
 │   ├── test_array_io.py              INPUT into an array element; OUTPUT of a whole array is refused
 │   ├── test_lexer_typo_detection.py  Catches the "<--" typo instead of misparsing it
+│   ├── test_procedures_functions.py  PROCEDURE/FUNCTION/CALL/RETURN, scoping, recursion
+│   ├── test_array_parameters.py      Array parameters passed by reference (extension)
+│   ├── test_file_handling.py         OPENFILE/READFILE/WRITEFILE/CLOSEFILE, sandboxing
 │   ├── test_error_handling.py         Milestone 10 cross-stage error contract and runtime edge cases
+│   ├── test_runtime_safety.py         Milestone 11 execution timeout / infinite-loop protection
 │   └── test_web_error_handling.py     Web API validation/error boundary checks
 ├── Procfile                Deployment entry point (gunicorn)
 ├── requirements.txt
@@ -125,11 +129,11 @@ directly.
 | 5 | Selection (IF/ELSE/ENDIF, CASE OF/OTHERWISE/ENDCASE) | ✅ Done |
 | 6 | Iteration (FOR/NEXT, REPEAT/UNTIL, WHILE/DO/ENDWHILE) | ✅ Done |
 | 7 | Arrays (1D and 2D, plus INPUT into an element) | ✅ Done |
-| 12 | Web interface | 🟡 Local test slice done (see note below) |
-| 8 | Procedures & functions | ⏳ Not started |
-| 9 | File handling (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) | ⏳ Not started |
+| 8 | Procedures & functions | ✅ Done |
+| 9 | File handling (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) | ✅ Done |
 | 10 | Error handling pass (consistency audit across all features) | ✅ Done |
 | 11 | Runtime safety (hard execution timeout / infinite-loop protection) | ✅ Done |
+| 12 | Web interface | 🟡 Local test slice done (see note below) |
 
 Milestone 12 was pulled forward and scoped down early to make manual
 testing easier; it currently covers a working local editor with live
@@ -157,16 +161,53 @@ comparing strictly against the syllabus:
 - **`<--` typo detection**: `X <-- 5` (an extra dash) raises a clear
   "looks like a typo" error instead of silently parsing as
   `X <- -5`, which was a real bug users hit.
+- **Array parameters**: a PROCEDURE/FUNCTION parameter can be declared
+  as an array (`ARRAY[1:10] OF INTEGER`) and is passed by reference,
+  beyond the SRS's scalar-only, by-value parameter grammar.
+- **File identifiers can be expressions, not just literals**: every
+  SRS example writes `OPENFILE "Names.txt" FOR READ` with the file
+  name as a quoted literal, but `OPENFILE`/`READFILE`/`WRITEFILE`/
+  `CLOSEFILE` all accept any STRING/CHAR-valued expression, so a
+  variable holding a filename works too (e.g. `OPENFILE Filename FOR
+  READ`).
+- **`WRITEFILE`'s value is a general expression**: the SRS's own
+  example passes a bare identifier (`WRITEFILE "Remarks.txt", Remark`),
+  but any expression is accepted, matching how `OUTPUT` already works
+  (e.g. `WRITEFILE "Log.txt", Name + ": " + Message`).
+
+### File handling notes (Milestone 9)
+
+- A file can only be open in one mode at a time (FR-9.1): `OPENFILE`
+  on a name that's already open is refused until it's `CLOSEFILE`d.
+  `OPENFILE ... FOR WRITE` creates the file if needed and truncates it
+  if it already exists; `FOR READ` requires the file to already exist.
+- `READFILE` reads one line and coerces it into the target identifier's
+  declared type exactly the way `INPUT` coerces a typed value — an
+  `INTEGER`/`REAL`/`BOOLEAN`/`CHAR` variable parses the line's text
+  accordingly, and reading past the last line is a clear error rather
+  than silently returning an empty value.
+- **Sandboxing (NFR-4, NFR-6)**: a file identifier must be a plain file
+  name — no path separators (`/` or `\`) and no `..` — so a program can
+  never read or write outside its own working directory. The
+  interpreter resolves every file identifier against a `file_root`
+  directory (an `Interpreter(..., file_root=...)` constructor argument,
+  defaulting to the current working directory); the web interface
+  points `file_root` at a fresh temporary directory for every run and
+  deletes it once the run finishes, so concurrent runs can't see or
+  interfere with each other's files.
+- Any files a program leaves open when it finishes (or errors out) are
+  closed automatically; a program is never required to `CLOSEFILE`
+  everything itself before ending.
 
 ### Known limitations
 
 - **No persistent saved-program backend yet**; the current web interface
   remains an in-memory/local execution tool rather than a multi-user
   account system.
-- **No user-defined procedures/functions yet** (Milestone 8) — calling
-  anything that isn't one of the built-in library functions gives a
-  clear "not supported yet" error rather than failing silently.
-- **No file handling yet** (Milestone 9).
+- **Files don't persist between runs** in the web interface: each Run
+  gets its own temporary working directory that's deleted afterwards
+  (see "File handling notes" above), so a file written by one Run
+  can't be read back by a later, separate Run.
 - **Arrays are used one element at a time**, following the SRS. A whole
   array can't be assigned, copied or output: `MyArray <- [1, 2, 3]`,
   `B <- A` and `OUTPUT MyArray` are all reported as errors that say how

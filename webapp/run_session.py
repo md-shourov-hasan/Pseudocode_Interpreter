@@ -19,6 +19,8 @@ budget. Once input is supplied, a fresh execution segment begins.
 import multiprocessing
 import os
 import queue
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -42,7 +44,17 @@ MAX_EXECUTION_SECONDS = _read_timeout_setting()
 
 
 def _worker_main(source: str, output_queue, input_queue):
-    """Parse and execute one program inside an isolated child process."""
+    """Parse and execute one program inside an isolated child process.
+
+    FR-9.1 - FR-9.4 (file handling) read and write real files, so this
+    worker's OPENFILE/READFILE/WRITEFILE/CLOSEFILE calls are pointed at
+    a fresh temporary directory that exists only for this one run and is
+    always removed afterwards -- satisfying NFR-4 ("shall not allow a
+    pseudocode program to access arbitrary locations on the host file
+    system") and NFR-6 ("each program's execution shall be isolated")
+    without the engine itself needing to know it's running inside a web
+    backend at all.
+    """
 
     def input_fn() -> str:
         output_queue.put({"type": "waiting"})
@@ -53,13 +65,14 @@ def _worker_main(source: str, output_queue, input_queue):
     def output_fn(line: str):
         output_queue.put({"type": "output", "text": line})
 
+    file_root = tempfile.mkdtemp(prefix="pseudocode-run-")
     try:
         # Startup time (including multiprocessing spawn/import overhead) is
         # not part of the user program's execution budget.
         output_queue.put({"type": "started"})
         tokens = tokenize(source)
         program = parse(tokens)
-        interp = Interpreter(input_fn=input_fn, output_fn=output_fn)
+        interp = Interpreter(input_fn=input_fn, output_fn=output_fn, file_root=file_root)
         interp.run(program)
         output_queue.put({"type": "done"})
     except PseudocodeError as e:
@@ -82,6 +95,8 @@ def _worker_main(source: str, output_queue, input_queue):
                 "message": "The program could not be completed because the compiler encountered an unexpected problem.",
             }
         )
+    finally:
+        shutil.rmtree(file_root, ignore_errors=True)
 
 
 class RunSession:

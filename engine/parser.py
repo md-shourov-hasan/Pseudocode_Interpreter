@@ -8,6 +8,7 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     statement   := declare_stmt | constant_stmt | input_stmt | output_stmt
                  | if_stmt | case_stmt | for_stmt | repeat_stmt | while_stmt
                  | call_stmt | return_stmt | assignment_stmt
+                 | openfile_stmt | readfile_stmt | writefile_stmt | closefile_stmt
 
     declare_stmt   := DECLARE IDENTIFIER (',' IDENTIFIER)* COLON
                        ( data_type | array_type )
@@ -35,6 +36,12 @@ Grammar implemented so far (EBNF-ish; NEWLINE separates statements):
     param          := IDENTIFIER ':' data_type                          -- FR-10.1, FR-10.3
     call_stmt      := CALL IDENTIFIER ( '(' arglist? ')' )?                 -- FR-10.2
     return_stmt    := RETURN expression                                    -- FR-10.3, only inside a FUNCTION
+
+    openfile_stmt  := OPENFILE expression FOR file_mode                    -- FR-9.1
+    file_mode      := READ | WRITE
+    readfile_stmt  := READFILE expression ',' IDENTIFIER                   -- FR-9.2
+    writefile_stmt := WRITEFILE expression ',' expression                  -- FR-9.3
+    closefile_stmt := CLOSEFILE expression                                 -- FR-9.4
 
     expression  := or_expr                                -- extension: AND/OR/NOT (added on request)
     or_expr     := and_expr ( OR and_expr )*
@@ -71,7 +78,13 @@ usable only via DECLARE, element assignment/read, and INPUT into an
 element (FR-8.x); a whole array can't cross a PROCEDURE/FUNCTION
 boundary in either direction.
 
-File handling (Milestone 9) remains unimplemented.
+File handling (FR-9.1 - FR-9.4, Milestone 9): the `<file identifier>`
+in every SRS example is a quoted STRING literal, but the grammar above
+parses it as a general `expression` -- so a STRING/CHAR variable works
+too, evaluated at runtime by the interpreter (see ast_nodes.py's
+module docstring and Interpreter._eval_file_identifier). READFILE's
+target, per the SRS's own grammar, is a plain IDENTIFIER only -- not
+an array element.
 """
 
 from .tokens import Token, TokenType
@@ -120,6 +133,10 @@ _STATEMENT_KEYWORDS = frozenset(
         TokenType.WHILE,
         TokenType.CALL,
         TokenType.RETURN,
+        TokenType.OPENFILE,
+        TokenType.READFILE,
+        TokenType.WRITEFILE,
+        TokenType.CLOSEFILE,
     }
 )
 
@@ -282,6 +299,14 @@ class Parser:
             return self._call_statement()
         if tok.type == TokenType.RETURN:
             return self._return_statement()
+        if tok.type == TokenType.OPENFILE:
+            return self._openfile_statement()
+        if tok.type == TokenType.READFILE:
+            return self._readfile_statement()
+        if tok.type == TokenType.WRITEFILE:
+            return self._writefile_statement()
+        if tok.type == TokenType.CLOSEFILE:
+            return self._closefile_statement()
         if tok.type == TokenType.IDENTIFIER:
             return self._assignment_statement()
 
@@ -296,15 +321,6 @@ class Parser:
                 f"A {keyword} definition must be at the top of the program, before any other "
                 f"statement, and cannot be nested inside another PROCEDURE or FUNCTION.",
             )
-
-        unsupported = {
-            TokenType.OPENFILE: "File handling statements are not supported yet.",
-            TokenType.READFILE: "File handling statements are not supported yet.",
-            TokenType.WRITEFILE: "File handling statements are not supported yet.",
-            TokenType.CLOSEFILE: "File handling statements are not supported yet.",
-        }
-        if tok.type in unsupported:
-            raise PseudocodeError(tok.line, unsupported[tok.type])
 
         unexpected_endings = {
             TokenType.ELSE: "ELSE does not have a matching IF statement.",
@@ -580,6 +596,50 @@ class Parser:
             )
         value = self._expression()
         return ast.Return(value, line)
+
+    # ---- file handling (FR-9.1 - FR-9.4) --------------------------------
+
+    def _openfile_statement(self):
+        """OPENFILE <file identifier> FOR <file mode>   (FR-9.1)"""
+        line = self._advance().line  # consume OPENFILE
+        file_expr = self._expression()
+        self._expect(TokenType.FOR, "Expected FOR after the file identifier in an OPENFILE statement")
+        mode_tok = self._peek()
+        if mode_tok.type == TokenType.READ:
+            mode = "READ"
+        elif mode_tok.type == TokenType.WRITE:
+            mode = "WRITE"
+        else:
+            raise PseudocodeError(
+                mode_tok.line,
+                f"Expected READ or WRITE after FOR in an OPENFILE statement, "
+                f"but found {describe_token(mode_tok)}.",
+            )
+        self._advance()  # consume READ/WRITE
+        return ast.OpenFile(file_expr, mode, line)
+
+    def _readfile_statement(self):
+        """READFILE <file identifier>, <identifier>   (FR-9.2)"""
+        line = self._advance().line  # consume READFILE
+        file_expr = self._expression()
+        self._expect(TokenType.COMMA, "Expected ',' after the file identifier in a READFILE statement")
+        name_tok = self._expect(TokenType.IDENTIFIER, "Expected an identifier after ',' in a READFILE statement")
+        target = ast.Identifier(name_tok.lexeme, name_tok.line, name_tok.column, name_tok.end_column)
+        return ast.ReadFile(file_expr, target, line)
+
+    def _writefile_statement(self):
+        """WRITEFILE <file identifier>, <value>   (FR-9.3)"""
+        line = self._advance().line  # consume WRITEFILE
+        file_expr = self._expression()
+        self._expect(TokenType.COMMA, "Expected ',' after the file identifier in a WRITEFILE statement")
+        value = self._expression()
+        return ast.WriteFile(file_expr, value, line)
+
+    def _closefile_statement(self):
+        """CLOSEFILE <file identifier>   (FR-9.4)"""
+        line = self._advance().line  # consume CLOSEFILE
+        file_expr = self._expression()
+        return ast.CloseFile(file_expr, line)
 
     def _if_statement(self):
         """IF <condition> [NEWLINE] THEN [NEWLINE] <block> [ELSE [NEWLINE] <block>] ENDIF   (FR-7.1, FR-7.2)"""

@@ -43,9 +43,6 @@ function buildCompletionEngine(lang, table) {
   const BUILTINS = new Set(lang.builtinFunctions);
   const BOOLEANS = new Set(lang.booleanLiterals);
 
-  // Keywords the grammar has, but the interpreter does not run yet (README
-  // milestone 9). They are still offered, ranked last and labelled.
-  const NOT_YET = new Set(["OPENFILE", "READFILE", "WRITEFILE", "CLOSEFILE"]);
   // Always-valid statement starters, offered at the start of any line.
   // PROCEDURE/FUNCTION are deliberately NOT here: the grammar only allows
   // them at the very top of the program (see scanDefinitions), so offering
@@ -53,6 +50,7 @@ function buildCompletionEngine(lang, table) {
   // for a "must be at the top of the program" error from the real compiler.
   const STATEMENT_KEYWORDS = [
     "DECLARE", "CONSTANT", "INPUT", "OUTPUT", "IF", "CASE", "FOR", "REPEAT", "WHILE", "CALL",
+    "OPENFILE", "READFILE", "WRITEFILE", "CLOSEFILE",
   ];
   // After one of these, a new statement may follow on the same line.
   const STATEMENT_STARTERS = new Set(["THEN", "ELSE", "DO", "OTHERWISE", "REPEAT"]);
@@ -431,6 +429,46 @@ function buildCompletionEngine(lang, table) {
     return routines;
   }
 
+  // Every STRING literal that has directly followed OPENFILE, READFILE,
+  // WRITEFILE or CLOSEFILE anywhere earlier in the program, deduplicated in
+  // the order first seen. This is what lets a filename be typed correctly
+  // once (in an OPENFILE, almost always) and then picked from a list
+  // everywhere else it's needed, instead of retyped -- and risking a typo
+  // that would silently refer to a different (and likely nonexistent) file.
+  function collectFileNames(toks) {
+    const names = [];
+    const seen = new Set();
+    for (let i = 0; i < toks.length; i += 1) {
+      const tk = toks[i];
+      const isFileStatement = tk.t === "kw" &&
+        (tk.v === "OPENFILE" || tk.v === "READFILE" || tk.v === "WRITEFILE" || tk.v === "CLOSEFILE");
+      if (!isFileStatement) continue;
+      const next = toks[i + 1];
+      if (next && next.t === "lit" && next.lit === "STRING" && !seen.has(next.v)) {
+        seen.add(next.v);
+        names.push(next.v); // includes the surrounding quotes, e.g. "Names.txt"
+      }
+    }
+    return names;
+  }
+
+  // Index of the first top-level comma in `toks` (i.e. not inside a nested
+  // "(...)" or "[...]"), or -1 if there isn't one. READFILE/WRITEFILE's
+  // <file identifier> can itself be a call expression with its own commas
+  // (e.g. SUBSTRING(Name, 1, 3)), so finding "the" comma that separates it
+  // from the statement's second argument has to track bracket depth rather
+  // than just looking for the first "," token.
+  function splitAtTopLevelComma(toks) {
+    let depth = 0;
+    for (let i = 0; i < toks.length; i += 1) {
+      const tk = toks[i];
+      if (tk.t === "(" || tk.t === "[") depth += 1;
+      else if (tk.t === ")" || tk.t === "]") depth -= 1;
+      else if (tk.t === "," && depth === 0) return i;
+    }
+    return -1;
+  }
+
   // ---- current statement -------------------------------------------------
   function isCaseValue(toks) {
     if (toks.length === 1) return toks[0].t === "lit";
@@ -452,15 +490,14 @@ function buildCompletionEngine(lang, table) {
 
   // ---- candidate factories -----------------------------------------------
   // group controls ordering: 0 expected keyword / closer, 1 keyword,
-  // 2 variable, 3 function, 4 literal, 9 not supported yet.
+  // 2 variable, 3 function, 4 literal.
   function keyword(label, group, strong) {
     const info = meta.get(label) || {};
-    const notYet = NOT_YET.has(label);
     return {
       label,
       kind: info.kind || "keyword",
-      detail: notYet ? "Not supported yet" : info.detail,
-      group: notYet ? "9" : group,
+      detail: info.detail,
+      group,
       // "strong": the grammar requires exactly this here, so it is safe to
       // offer even after a single typed letter.
       strong: Boolean(strong),
@@ -489,6 +526,15 @@ function buildCompletionEngine(lang, table) {
       ? `FUNCTION(${paramList}) RETURNS ${r.returnType || "?"}`
       : `PROCEDURE(${paramList})`;
     return { label: r.name, kind: "function", detail, group: "2", strong: true };
+  }
+
+  // `lit` is a whole quoted STRING literal, e.g. "Names.txt" -- one of the
+  // filenames collectFileNames found. Offered as a single unit (quotes
+  // included) right where a <file identifier> expression begins, ranked
+  // above plain variables/functions since a filename already used
+  // elsewhere in the program is the single most likely thing to want here.
+  function fileNameCandidate(lit) {
+    return { label: lit, kind: "value", detail: "File name used elsewhere in this program", group: "1", strong: true };
   }
 
   const typeCandidates = (withArray) =>
@@ -553,6 +599,25 @@ function buildCompletionEngine(lang, table) {
     return out;
   }
 
+  // A <file identifier> (OPENFILE/READFILE/WRITEFILE/CLOSEFILE) is, in
+  // practice, always either a filename literal or a plain STRING/CHAR
+  // variable holding one -- never a computed one. So unlike expression()
+  // above (used for OUTPUT, IF, WRITEFILE's value, ...), this deliberately
+  // does NOT fall back to suggesting every STRING-returning built-in
+  // (LCASE/UCASE/SUBSTRING) as an operand: that's technically legal here
+  // too, but it's noise nobody typing a filename wants to see. Known
+  // filenames (fileNames, from collectFileNames) take their place instead.
+  function fileIdentifierCandidates(rest, thenKeywords, fileNames, symbols) {
+    const state = scanExpression(rest, "string");
+    if (state.expectOperand) {
+      if (rest.length > 0) return []; // mid-expression (e.g. after an operator); nothing to add
+      const names = fileNames.map(fileNameCandidate);
+      const vars = [...symbols.values()].filter((s) => fits(s, "string")).map(symbolCandidate);
+      return names.concat(vars);
+    }
+    return state.depth === 0 ? thenKeywords.map((word) => keyword(word, "0", true)) : [];
+  }
+
   // ---- per-statement contexts ---------------------------------------------
   function startOfStatement(lineStart, blocks, symbols, atTop) {
     const out = [];
@@ -589,7 +654,6 @@ function buildCompletionEngine(lang, table) {
       if (blocks.stack[0] && blocks.stack[0].type === "FUNCTION") out.push(keyword("RETURN", "1"));
     }
     for (const word of STATEMENT_KEYWORDS) out.push(keyword(word, "1"));
-    for (const word of NOT_YET) out.push(keyword(word, "9"));
     for (const sym of symbols.values()) if (sym.kind !== "const") out.push(symbolCandidate(sym));
     return out;
   }
@@ -731,7 +795,7 @@ function buildCompletionEngine(lang, table) {
     return expression(inner.slice(sliceStart), argType, {}, symbols);
   }
 
-  function statementContext(stmt, blocks, symbols, routines) {
+  function statementContext(stmt, blocks, symbols, routines, fileNames) {
     const first = stmt[0];
     if (first.t === "id") {
       const assign = stmt.findIndex((tk) => tk.t === "assign");
@@ -780,6 +844,42 @@ function buildCompletionEngine(lang, table) {
       case "FUNCTION": return routineHeaderContext(stmt, true, symbols);
       case "CALL": return callContext(stmt, routines, symbols);
       case "RETURN": return expression(rest, "any", { logic: true }, symbols);
+
+      // <file identifier> is a general STRING/CHAR expression (see
+      // ast_nodes.py's module docstring for why), so it gets the same
+      // expression() treatment as everything else -- just seeded, when
+      // nothing has been typed yet, with any filenames already used
+      // elsewhere in the program (collectFileNames).
+      case "OPENFILE": {
+        const forIdx = rest.findIndex((tk) => tk.t === "kw" && tk.v === "FOR");
+        if (forIdx < 0) return fileIdentifierCandidates(rest, ["FOR"], fileNames, symbols);
+        // FOR has been typed; READ/WRITE (FR-9.1's two file modes) are the
+        // only thing that can come next, and only while nothing after FOR
+        // has been typed yet -- like THEN/DO elsewhere, they're exact,
+        // closed keywords rather than the start of another expression.
+        return rest.length === forIdx + 1 ? [keyword("READ", "0", true), keyword("WRITE", "0", true)] : [];
+      }
+      case "READFILE": {
+        const commaIdx = splitAtTopLevelComma(rest);
+        if (commaIdx < 0) return fileIdentifierCandidates(rest, [], fileNames, symbols);
+        // The SRS's own grammar makes READFILE's target a plain identifier
+        // (not an array element or a general expression, unlike the file
+        // identifier), so once the comma is typed the only thing worth
+        // suggesting is a variable to read into -- and only a scalar one
+        // that isn't a CONSTANT, matching what the interpreter itself
+        // accepts (Interpreter._exec_readfile).
+        if (rest.length !== commaIdx + 1) return [];
+        return [...symbols.values()].filter((s) => s.kind !== "const" && s.kind !== "array").map(symbolCandidate);
+      }
+      case "WRITEFILE": {
+        const commaIdx = splitAtTopLevelComma(rest);
+        if (commaIdx < 0) return fileIdentifierCandidates(rest, [], fileNames, symbols);
+        // The value being written is a general expression, exactly like an
+        // OUTPUT value.
+        return expression(rest.slice(commaIdx + 1), "any", { logic: true }, symbols);
+      }
+      case "CLOSEFILE": return fileIdentifierCandidates(rest, [], fileNames, symbols);
+
       default: return [];
     }
   }
@@ -795,10 +895,11 @@ function buildCompletionEngine(lang, table) {
     const line = toks.slice(lastNewline + 1);
     const symbols = collectSymbols(toks);
     const routines = collectRoutines(toks);
+    const fileNames = collectFileNames(toks);
     const blocks = analyzeBlocks(before);
     const stmt = currentStatement(line);
     if (stmt.length === 0) return startOfStatement(line.length === 0, blocks, symbols, atTopOfProgram(before));
-    return statementContext(stmt, blocks, symbols, routines);
+    return statementContext(stmt, blocks, symbols, routines, fileNames);
   }
 
   return { candidates, tokenize };
@@ -1022,6 +1123,15 @@ window.PseudocodeMonaco = Object.freeze({
     const engine = buildCompletionEngine(this.language, this.completions);
 
     return monaco.languages.registerCompletionItemProvider(this.languageId, {
+      // Without this, Monaco only asks provideCompletionItems automatically
+      // while a word (per wordPattern) is being typed -- so a context that's
+      // valid the moment a keyword is followed by a space (or a comma), with
+      // nothing typed yet, would never actually pop up on its own. That's
+      // exactly the position filenames are offered in (right after
+      // OPENFILE/READFILE/WRITEFILE/CLOSEFILE, and after READFILE/WRITEFILE's
+      // comma), and where READ/WRITE are offered (right after FOR) -- so
+      // typing a space or comma has to trigger a request itself.
+      triggerCharacters: [" ", ","],
       provideCompletionItems(model, position) {
         const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
 

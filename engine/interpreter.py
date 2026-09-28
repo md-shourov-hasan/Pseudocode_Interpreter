@@ -45,6 +45,10 @@ Implements:
     FR-10.4       A FUNCTION can only be invoked from within an
                   expression, never with CALL (checked in _exec_call
                   and _eval_call respectively)
+    FR-9.1        OPENFILE <file identifier> FOR READ|WRITE
+    FR-9.2        READFILE <file identifier>, <identifier> -- one line in
+    FR-9.3        WRITEFILE <file identifier>, <value> -- one line out
+    FR-9.4        CLOSEFILE <file identifier>
     (ext)         AND / OR / NOT boolean connectives in conditions,
                   requested beyond the reference syntax guide
 
@@ -67,7 +71,23 @@ value, like an ordinary assignment (REAL/INTEGER narrowing and
 widening apply the same way) -- arrays cannot be passed as
 PROCEDURE/FUNCTION parameters at all. See Interpreter._call_frame.
 
-Not yet implemented (later milestone): file handling (M9).
+File handling (FR-9.1 - FR-9.4, Milestone 9): a "file identifier" is
+whatever STRING/CHAR value `file_expr` evaluates to (see
+ast_nodes.py's module docstring) -- normally a literal filename, as in
+every SRS example, but a variable works too. NFR-4 ("shall not allow a
+pseudocode program to access arbitrary locations on the host file
+system") is enforced two ways: every file identifier must be a plain
+name with no path separators or '..' (Interpreter._resolve_file_path),
+and it is then resolved against ``file_root`` -- a directory supplied
+by the caller (defaulting to the current working directory), which the
+web interface points at a fresh, per-run temporary directory that is
+deleted once the run ends (see webapp/run_session.py). Open files are
+tracked in ``self._open_files`` (keyed by file identifier, not by any
+particular variable, since OPENFILE/READFILE/WRITEFILE/CLOSEFILE all
+name the file directly); FR-9.1's "a file shall only be opened in one
+mode at a time" is enforced by refusing to OPENFILE a name that's
+already open. Any files a program leaves open when it finishes (or
+errors out) are closed automatically by ``run()``.
 
 Array storage note: each array's elements live in a plain dict keyed
 by index tuple (e.g. (3,) for 1D, (2, 5) for 2D), eagerly filled with
@@ -90,6 +110,7 @@ student-facing ``PseudocodeError`` when the limit is exceeded.
 """
 
 import math
+import os
 import random
 import sys
 import time
@@ -217,13 +238,19 @@ class Symbol:
 
 
 class Interpreter:
-    def __init__(self, input_fn=None, output_fn=None, max_execution_seconds=None):
+    def __init__(self, input_fn=None, output_fn=None, max_execution_seconds=None, file_root=None):
         """
         input_fn:  callable() -> str, used to satisfy INPUT statements.
                    Defaults to the real `input()`.
         output_fn: callable(str) -> None, called once per OUTPUT statement
                    with the fully-formatted line. Defaults to collecting
                    lines into self.output (and also printing them).
+        file_root: directory that OPENFILE/READFILE/WRITEFILE/CLOSEFILE
+                   (FR-9.1 - FR-9.4) resolve file identifiers against.
+                   Defaults to the current working directory. The web
+                   interface passes a fresh per-run temporary directory
+                   so a program can never read or write outside it
+                   (NFR-4, NFR-6) -- see webapp/run_session.py.
         """
         self.symbols: dict[str, Symbol] = {}
         # A stable handle to the top-level scope, kept even while `self.symbols`
@@ -246,6 +273,8 @@ class Interpreter:
         self._output_fn = output_fn if output_fn is not None else self.output.append
         self._current_line = 0
         self._array_elements = 0  # elements allocated so far, across all arrays
+        self._open_files: dict[str, dict] = {}  # file identifier -> {"mode", "handle"}
+        self._file_root = file_root if file_root is not None else os.getcwd()
         self._max_execution_seconds = max_execution_seconds
         self._execution_started_at = None
         self._timeout_check_counter = 0
@@ -291,6 +320,20 @@ class Interpreter:
             raise normalize_unexpected_error(self._current_line, exc) from None
         finally:
             sys.setrecursionlimit(old_recursion_limit)
+            self._close_all_files()
+
+    def _close_all_files(self):
+        """Close any files a program left open (whether it finished
+        normally or errored out) -- a program is never required to
+        CLOSEFILE everything itself before ending (FR-9.4 doesn't
+        require it), and leaking open file handles would otherwise
+        outlive this run."""
+        for entry in self._open_files.values():
+            try:
+                entry["handle"].close()
+            except OSError:
+                pass
+        self._open_files.clear()
 
     def _check_execution_timeout(self, line=None):
         """Raise a language-level timeout once the configured run limit is exceeded.
@@ -889,6 +932,146 @@ class Interpreter:
     def _exec_return(self, stmt: ast.Return):
         raise _ReturnSignal(self._eval(stmt.value))
 
+    # ---- file handling (FR-9.1 - FR-9.4) -----------------------------------
+
+    def _eval_file_identifier(self, node):
+        """Evaluate a `file_expr` (see ast_nodes.py's module docstring) and
+        check it's a usable file name. CHAR is accepted alongside STRING
+        since both are Python `str` here and a single-character file name
+        is a perfectly ordinary (if unusual) one."""
+        value = self._eval(node)
+        if not isinstance(value, str):
+            raise PseudocodeError(
+                node.line,
+                f"A file identifier must be a STRING value, but got {self._type_name(value)}.",
+                column=node.column,
+                end_column=node.end_column,
+            )
+        if not value:
+            raise PseudocodeError(
+                node.line,
+                "A file identifier cannot be an empty STRING.",
+                column=node.column,
+                end_column=node.end_column,
+            )
+        return value
+
+    def _resolve_file_path(self, name, line):
+        """Turn a file identifier into an actual path inside `self._file_root`
+        (NFR-4: "shall not allow a pseudocode program to access arbitrary
+        locations on the host file system"). Every example in the SRS is a
+        plain file name, so anything that looks like it's trying to reach
+        outside the current directory -- a path separator, or '..' -- is
+        rejected outright rather than silently resolved."""
+        if "/" in name or "\\" in name or name in (".", ".."):
+            raise PseudocodeError(
+                line,
+                f"'{name}' is not a valid file name. File access is limited to plain file "
+                f"names (no folders or '..') in the program's own working directory.",
+            )
+        return os.path.join(self._file_root, name)
+
+    def _require_open_file(self, name, needed_mode, action, line):
+        entry = self._open_files.get(name)
+        if entry is None:
+            raise PseudocodeError(
+                line,
+                f"'{name}' is not open. Use OPENFILE \"{name}\" FOR {needed_mode} before using {action}.",
+            )
+        if entry["mode"] != needed_mode:
+            raise PseudocodeError(
+                line,
+                f"'{name}' is open for {entry['mode']}, but {action} needs it open for {needed_mode}.",
+            )
+        return entry
+
+    def _exec_openfile(self, stmt: ast.OpenFile):
+        """OPENFILE <file identifier> FOR <file mode>   (FR-9.1)"""
+        name = self._eval_file_identifier(stmt.file_expr)
+        if name in self._open_files:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is already open. Close it with CLOSEFILE before opening it again.",
+            )
+        path = self._resolve_file_path(name, stmt.line)
+        if stmt.mode == "READ":
+            try:
+                handle = open(path, "r", encoding="utf-8")
+            except FileNotFoundError:
+                raise PseudocodeError(
+                    stmt.line, f"'{name}' could not be opened for READ: the file does not exist."
+                ) from None
+            except OSError:
+                raise PseudocodeError(stmt.line, f"'{name}' could not be opened for READ.") from None
+        else:  # "WRITE" -- creates the file, or overwrites it if it already exists (FR-9.1)
+            try:
+                handle = open(path, "w", encoding="utf-8", newline="\n")
+            except OSError:
+                raise PseudocodeError(stmt.line, f"'{name}' could not be opened for WRITE.") from None
+        self._open_files[name] = {"mode": stmt.mode, "handle": handle}
+
+    def _exec_readfile(self, stmt: ast.ReadFile):
+        """READFILE <file identifier>, <identifier>   (FR-9.2)"""
+        name = self._eval_file_identifier(stmt.file_expr)
+        entry = self._require_open_file(name, "READ", "READFILE", stmt.line)
+        raw = entry["handle"].readline()
+        if raw == "":
+            raise PseudocodeError(stmt.line, f"READFILE tried to read past the end of '{name}'.")
+        text = raw[:-1] if raw.endswith("\n") else raw  # drop the trailing newline, keep the rest
+
+        target = stmt.target
+        symbol = self.symbols.get(target.name)
+        if symbol is None:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{target.name}' is used here but was never declared with DECLARE.",
+                column=target.column,
+                end_column=target.end_column,
+            )
+        self._ensure_scalar(symbol, target.name, stmt.line, target.column, target.end_column)
+        if symbol.is_constant:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{target.name}' is a CONSTANT and cannot be reassigned.",
+                column=target.column,
+                end_column=target.end_column,
+            )
+        try:
+            value = self._coerce_input(text, symbol.data_type)
+        except ValueError:
+            raise PseudocodeError(
+                stmt.line,
+                f"Couldn't read '{text}' from '{name}' as {_with_article(symbol.data_type)} "
+                f"value for '{target.name}'.",
+                column=target.column,
+                end_column=target.end_column,
+            )
+        symbol.value = value
+
+    def _exec_writefile(self, stmt: ast.WriteFile):
+        """WRITEFILE <file identifier>, <value>   (FR-9.3)"""
+        name = self._eval_file_identifier(stmt.file_expr)
+        entry = self._require_open_file(name, "WRITE", "WRITEFILE", stmt.line)
+        if isinstance(stmt.value, ast.Identifier):
+            symbol = self.symbols.get(stmt.value.name)
+            if symbol is not None and symbol.is_array:
+                raise PseudocodeError(
+                    stmt.line,
+                    f"'{stmt.value.name}' is an array, so it can't be written to a file as a "
+                    f"whole. Write each element separately using its index, e.g. WRITEFILE "
+                    f"\"{name}\", {stmt.value.name}[1].",
+                )
+        value = self._eval(stmt.value)
+        entry["handle"].write(self._format_value(value) + "\n")
+
+    def _exec_closefile(self, stmt: ast.CloseFile):
+        """CLOSEFILE <file identifier>   (FR-9.4)"""
+        name = self._eval_file_identifier(stmt.file_expr)
+        entry = self._open_files.pop(name, None)
+        if entry is None:
+            raise PseudocodeError(stmt.line, f"'{name}' is not currently open, so it can't be closed.")
+        entry["handle"].close()
+
     # ---- expression evaluation --------------------------------------------
 
     def _eval(self, node):
@@ -1353,6 +1536,10 @@ Interpreter._STATEMENT_HANDLERS = {
     ast.FunctionDecl: Interpreter._exec_function_decl,
     ast.ProcedureCall: Interpreter._exec_procedure_call,
     ast.Return: Interpreter._exec_return,
+    ast.OpenFile: Interpreter._exec_openfile,
+    ast.ReadFile: Interpreter._exec_readfile,
+    ast.WriteFile: Interpreter._exec_writefile,
+    ast.CloseFile: Interpreter._exec_closefile,
 }
 
 Interpreter._EXPR_HANDLERS = {
@@ -1381,10 +1568,12 @@ def run(
     input_fn=None,
     output_fn=None,
     max_execution_seconds=None,
+    file_root=None,
 ) -> list[str]:
     """Convenience wrapper: run a full Program and return its output lines."""
     return Interpreter(
         input_fn=input_fn,
         output_fn=output_fn,
         max_execution_seconds=max_execution_seconds,
+        file_root=file_root,
     ).run(program)
