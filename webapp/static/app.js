@@ -374,29 +374,73 @@ async function startRun() {
     return;
   }
 
-  const data = await res.json();
-  if (!res.ok) {
+  const data = await readJson(res);
+  if (!res.ok || !data.run_id) {
+    // 429/503 mean the server's run limits were reached; the message says
+    // to wait and try again.
     appendError(null, data.error || "Couldn't start the program.");
-    finishRun("error", "Error");
+    finishRun("error", res.status === 429 || res.status === 503 ? "Busy" : "Error");
     return;
   }
 
   currentRunId = data.run_id;
-  pollTimer = setInterval(poll, 150);
+  pollFailures = 0;
+  schedulePoll(currentRunId);
 }
 
-async function poll() {
-  if (!currentRunId) return;
-  const res = await fetch(`/api/run/${currentRunId}/poll`);
+// A response body that isn't JSON (e.g. a proxy error page) must not throw.
+async function readJson(res) {
+  try {
+    return await res.json();
+  } catch (err) {
+    return {};
+  }
+}
+
+// Polls run one after another (never overlapping), so events are always
+// appended in order. Each poll is a long-poll: the server holds it for up to
+// POLL_WAIT_SECONDS until something happens, so an idle or INPUT-waiting
+// program costs about one request a second rather than several. When events
+// did arrive, the next poll waits POLL_BATCH_MS first, so a program that
+// OUTPUTs continuously is fetched in batches instead of one line per request.
+const POLL_WAIT_SECONDS = 1.5;
+const POLL_BATCH_MS = 150;
+const MAX_POLL_FAILURES = 5;
+let pollFailures = 0;
+
+function schedulePoll(runId, delayMs = 0) {
+  pollTimer = setTimeout(() => poll(runId), delayMs);
+}
+
+async function poll(runId) {
+  pollTimer = null;
+  if (runId !== currentRunId) return;
+
+  let res;
+  try {
+    res = await fetch(`/api/run/${runId}/poll?wait=${POLL_WAIT_SECONDS}`);
+  } catch (err) {
+    // Ride out a brief network blip rather than abandoning the run.
+    if (++pollFailures >= MAX_POLL_FAILURES) {
+      currentRunId = null;
+      appendError(null, "Lost the connection to the compiler server.");
+      finishRun("error", "Error");
+    } else if (runId === currentRunId) {
+      schedulePoll(runId, 1000);
+    }
+    return;
+  }
+  if (runId !== currentRunId) return;
   if (!res.ok) {
-    stopPolling();
+    currentRunId = null;
     appendError(null, "Lost track of the running program.");
     finishRun("error", "Error");
     return;
   }
-  const data = await res.json();
+  pollFailures = 0;
+  const data = await readJson(res);
 
-  for (const event of data.events) {
+  for (const event of data.events || []) {
     if (event.type === "output") {
       appendLine(event.text);
     } else if (event.type === "waiting") {
@@ -410,11 +454,13 @@ async function poll() {
   }
 
   if (data.state === "finished") {
-    stopPolling();
+    currentRunId = null;
     finishRun("done", "Finished");
-  } else if (data.state === "error" || data.state === "timeout") {
-    stopPolling();
-    finishRun("error", data.state === "timeout" ? "Timed out" : "Error");
+  } else if (data.state === "error" || data.state === "timeout" || data.state === "cancelled") {
+    currentRunId = null;
+    finishRun("error", data.state === "timeout" ? "Timed out" : data.state === "cancelled" ? "Stopped" : "Error");
+  } else {
+    schedulePoll(runId, (data.events || []).length ? POLL_BATCH_MS : 0);
   }
 }
 
@@ -424,12 +470,15 @@ function finishRun(state, label) {
   setStatus(state, label);
 }
 
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+// When the SudoLab page navigates away (or the tab closes), the iframe is
+// unloaded: tell the server so it stops the run now instead of waiting for
+// the abandoned-run timeout. sendBeacon is the only request that reliably
+// survives page unload.
+window.addEventListener("pagehide", () => {
+  if (currentRunId && navigator.sendBeacon) {
+    navigator.sendBeacon(`/api/run/${currentRunId}/cancel`);
   }
-}
+});
 
 // ---- input row --------------------------------------------------------
 
@@ -446,16 +495,31 @@ function hideInputRow() {
 
 inputRow.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (!currentRunId) return;
+  if (!currentRunId || inputRow.classList.contains("hidden")) return;
   const value = inputField.value;
   appendLine("> " + value, "waiting-marker");
   hideInputRow();
   setStatus("running", "Running…");
-  await fetch(`/api/run/${currentRunId}/input`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value }),
-  });
+  let res;
+  try {
+    res = await fetch(`/api/run/${currentRunId}/input`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  } catch (err) {
+    appendError(null, "Couldn't send that value to the compiler server.");
+    showInputRow();
+    return;
+  }
+  if (res.status === 413) {
+    // Too long: the program is still waiting, so let the student retry.
+    const data = await readJson(res);
+    appendError(null, data.error || "That value is too long.");
+    showInputRow();
+  }
+  // Any other refusal (409: the run already ended) is reported by the
+  // next poll, which carries the run's final state.
 });
 
 runBtn.addEventListener("click", startRun);

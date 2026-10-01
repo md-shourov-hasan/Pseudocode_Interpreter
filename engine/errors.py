@@ -120,7 +120,9 @@ def normalize_unexpected_error(line: int, exc: Exception) -> PseudocodeError:
     exception can never leak into the language's normal error channel.
     """
 
-    if isinstance(exc, ZeroDivisionError):
+    if isinstance(exc, MemoryError):
+        message = "The program was stopped because it used too much memory."
+    elif isinstance(exc, ZeroDivisionError):
         message = "The program tried to divide by zero."
     elif isinstance(exc, OverflowError):
         message = "The calculation produced a number outside the supported range."

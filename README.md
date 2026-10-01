@@ -82,8 +82,9 @@ Pseudocode_Interpreter/
 │   ├── test_file_handling.py         OPENFILE/READFILE/WRITEFILE/CLOSEFILE, sandboxing
 │   ├── test_error_handling.py         Milestone 10 cross-stage error contract and runtime edge cases
 │   ├── test_runtime_safety.py         Milestone 11 execution timeout / infinite-loop protection
-│   └── test_web_error_handling.py     Web API validation/error boundary checks
+│   └── test_web_error_handling.py     Web server limits, run lifecycle, API validation
 ├── Procfile                Deployment entry point (gunicorn)
+├── gunicorn.conf.py        One worker process, threaded (required by the in-memory run store)
 ├── requirements.txt
 └── README.md
 ```
@@ -113,9 +114,49 @@ bottom of the console so you can type a value and continue — no need
 to pre-supply every input up front. Errors show up in red with the
 line number they relate to.
 
-**Deploying:** a `Procfile` (`web: gunicorn webapp.app:app`) is
-included for platforms like Heroku/Render that run a `Procfile`
-directly.
+**Deploying:** start the app with `gunicorn webapp.app:app` from the
+repository root (the `Procfile` does this). Gunicorn picks up
+`gunicorn.conf.py` automatically, which runs **exactly one worker
+process** with 16 threads. Runs are tracked in memory in that one
+process, so don't pass `--workers`/`-w` in the host's start command.
+
+### Web server limits
+
+The interpreter is public and embedded in the SudoLab site as an
+iframe, and every Run is its own process, so the server protects itself
+with these limits. Each one can be changed with an environment variable.
+The defaults are sized for Render's free plan (512 MB RAM, 0.1 CPU) and
+were checked under a simulated free-plan CPU and memory cap: six
+simultaneous memory-hungry runs peaked at ~140 MB in total and the server
+stayed responsive. On a bigger plan, raise `PSEUDOCODE_MAX_ACTIVE_RUNS`,
+keeping active runs × `PSEUDOCODE_WORKER_MEMORY_LIMIT_MB` below the
+instance's RAM minus ~100 MB.
+
+| Limit | Default | Environment variable |
+|---|---|---|
+| Active execution time per run (paused while waiting for `INPUT`) | 10 s | `PSEUDOCODE_MAX_EXECUTION_SECONDS` |
+| Longest wait at one `INPUT` prompt | 300 s | `PSEUDOCODE_MAX_INPUT_WAIT_SECONDS` |
+| Run stopped after this long with no polling (page closed) | 150 s | `PSEUDOCODE_ABANDONED_RUN_SECONDS` |
+| Ended runs forgotten after | 120 s | `PSEUDOCODE_RESULT_RETENTION_SECONDS` |
+| Active runs, whole server | 6 | `PSEUDOCODE_MAX_ACTIVE_RUNS` |
+| Active runs per client IP | 3 | `PSEUDOCODE_MAX_ACTIVE_RUNS_PER_CLIENT` |
+| Runs started per client IP per minute | 30 | `PSEUDOCODE_MAX_RUN_STARTS_PER_MINUTE` |
+| `OUTPUT` per run | 5,000 lines / 500,000 chars | `PSEUDOCODE_MAX_OUTPUT_LINES`, `PSEUDOCODE_MAX_OUTPUT_CHARS` |
+| Worker memory (Linux only) | 64 MB | `PSEUDOCODE_WORKER_MEMORY_LIMIT_MB` |
+| Program size / one `INPUT` value | 100,000 / 10,000 chars | (constants in `webapp/app.py`) |
+
+To keep CPU use low, the page long-polls (the server holds each poll for
+up to 1.5 s until there's news). On Linux, workers start by forking a
+preloaded fork server instead of a fresh Python interpreter, and run at
+a lower CPU priority than the web server. The page also tells the server
+to stop its run when it's closed, using
+`navigator.sendBeacon` on `pagehide`. Clients are identified by IP
+address, because cookies are often blocked inside a third-party iframe.
+On Render (detected through the `RENDER` variable) the address is read
+from the last `X-Forwarded-For` hop. Set `TRUSTED_PROXY_COUNT` to change
+how many proxy hops are trusted. A whole classroom behind one school
+network shares one IP, so raise the per-client limits if that's how the
+interpreter is used.
 
 ## Milestones
 
