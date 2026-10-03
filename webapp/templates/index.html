@@ -7,6 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!--
+  Monaco injects this stylesheet itself, but only after the editor has already
+  been created, so the editor is laid out unstyled and then jumps into place.
+  Loading it up front avoids that jump. Keep the version in step with loader.js.
+-->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs/editor/editor.main.css">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
