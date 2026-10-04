@@ -897,4 +897,14 @@ class Parser:
 
 def parse(tokens: list[Token]) -> ast.Program:
     """Convenience wrapper: parse a full token list into a Program."""
-    return Parser(tokens).parse()
+    parser = Parser(tokens)
+    try:
+        return parser.parse()
+    except RecursionError:
+        # Each level of brackets or nested blocks costs several Python stack
+        # frames; report running out of them as an ordinary error.
+        raise PseudocodeError(
+            parser._peek().line,
+            "This part of the program is nested too deeply (too many brackets or "
+            "blocks inside one another).",
+        ) from None

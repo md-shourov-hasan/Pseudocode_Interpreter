@@ -29,6 +29,12 @@ from .tokens import Token, TokenType, KEYWORDS
 from .errors import PseudocodeError
 
 
+def _is_digit(ch: str) -> bool:
+    """ASCII 0-9 only. str.isdigit() also accepts characters such as a
+    superscript two, which int() then cannot convert."""
+    return "0" <= ch <= "9"
+
+
 class Lexer:
     def __init__(self, source: str):
         self.source = source
@@ -121,7 +127,7 @@ class Lexer:
             return
 
         # Numbers: FR-2.1 / FR-2.2
-        if ch.isdigit():
+        if _is_digit(ch):
             self._number(ch)
             return
 
@@ -241,12 +247,12 @@ class Lexer:
     def _number(self, first_digit: str):
         start_line = self.line
         digits = [first_digit]
-        while self._peek().isdigit():
+        while _is_digit(self._peek()):
             digits.append(self._advance())
 
-        if self._peek() == "." and self._peek(1).isdigit():
+        if self._peek() == "." and _is_digit(self._peek(1)):
             digits.append(self._advance())  # consume '.'
-            while self._peek().isdigit():
+            while _is_digit(self._peek()):
                 digits.append(self._advance())
             text = "".join(digits)
             value = float(text)
