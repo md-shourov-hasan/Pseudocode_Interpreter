@@ -30,9 +30,14 @@
     <span id="status-label">Loading editor…</span>
   </div>
 
-  <button id="run-btn" class="run-btn" disabled>
-    <span class="run-icon">&#9654;</span> Run
-  </button>
+  <div class="actions">
+    <button id="run-btn" class="run-btn" disabled>
+      <span class="run-icon">&#9654;</span> Run
+    </button>
+    <button id="stop-btn" class="stop-btn" disabled>
+      <span class="run-icon">&#9632;</span> Stop
+    </button>
+  </div>
 </header>
 
 <main class="workspace">
@@ -43,6 +48,11 @@
       <div id="editor" class="monaco-host" aria-label="Pseudocode source editor"></div>
     </div>
   </section>
+
+  <div id="splitter" class="splitter" role="separator" tabindex="0"
+       aria-label="Resize the source and output panes"
+       aria-valuemin="15" aria-valuemax="85"
+       title="Drag to resize, double-click to reset"></div>
 
   <section class="pane console-pane">
     <div class="pane-header">Output</div>
@@ -62,6 +72,7 @@
   language definition is kept in a separate adapter so the eventual VS Code
   extension can reuse the same language rules without depending on Flask.
 -->
+<script src="{{ url_for('static', filename='splitter.js') }}"></script>
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs/loader.js"></script>
 <script src="{{ url_for('static', filename='pseudocode-monaco.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>

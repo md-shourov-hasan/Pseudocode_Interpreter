@@ -1,5 +1,6 @@
 const editorHost = document.getElementById("editor");
 const runBtn = document.getElementById("run-btn");
+const stopBtn = document.getElementById("stop-btn");
 const statusDot = document.getElementById("status-dot");
 const statusLabel = document.getElementById("status-label");
 const consoleEl = document.getElementById("console");
@@ -441,7 +442,28 @@ async function startRun() {
 
   currentRunId = data.run_id;
   pollFailures = 0;
+  stopBtn.disabled = false;
   schedulePoll(currentRunId);
+}
+
+// Stop pressed: end the run now. Clearing currentRunId first makes any poll
+// still in flight discard its result, so nothing more is printed after the
+// "stopped" line; the server is then told to kill the program.
+function stopRun() {
+  const runId = currentRunId;
+  if (!runId) return;
+
+  currentRunId = null;
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  appendLine("The program has been stopped by the user", "stopped-line");
+  finishRun("error", "Stopped");
+
+  // If this request fails, the server still stops the run by itself once it
+  // notices nobody is polling it any more.
+  fetch(`/api/run/${runId}/cancel`, { method: "POST" }).catch(() => {});
 }
 
 // A response body that isn't JSON (e.g. a proxy error page) must not throw.
@@ -522,6 +544,7 @@ async function poll(runId) {
 
 function finishRun(state, label) {
   runBtn.disabled = false;
+  stopBtn.disabled = true;
   hideInputRow();
   setStatus(state, label);
 }
@@ -579,3 +602,4 @@ inputRow.addEventListener("submit", async (e) => {
 });
 
 runBtn.addEventListener("click", startRun);
+stopBtn.addEventListener("click", stopRun);
