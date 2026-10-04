@@ -132,6 +132,39 @@ body {
 
 .run-icon { font-size: 10px; }
 
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.stop-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.stop-btn:hover:not(:disabled) {
+  background: var(--error);
+  color: #1a0503;
+}
+
+.stop-btn:disabled {
+  border-color: var(--border);
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* ---- workspace ------------------------------------------------------- */
 
 .workspace {
@@ -146,8 +179,56 @@ body {
   min-width: 0;
 }
 
-.editor-pane { flex: 1.4; border-right: 1px solid var(--border); }
-.console-pane { flex: 1; }
+/* --split is the editor pane's share of the workspace, set by splitter.js.
+   The fallback is the original fixed 1.4 : 1 layout. */
+.editor-pane { flex: 0 1 var(--split, 58.33%); }
+
+/* The output pane never gets narrower than its input row needs: the editor
+   gives up space instead (it can shrink, see above). Anything that still
+   doesn't fit is clipped rather than widening the page. */
+.console-pane { flex: 1; min-width: 240px; overflow: hidden; }
+
+/* ---- splitter ------------------------------------------------------- */
+
+/* A 1px line that doubles as the border between the panes. The ::after is an
+   invisible, wider grab area; the ::before is the highlight shown on hover,
+   focus and while dragging. */
+.splitter {
+  position: relative;
+  z-index: 5; /* keep the grab area above the editor's scrollbar */
+  flex: 0 0 1px;
+  background: var(--border);
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.splitter::before,
+.splitter::after {
+  content: "";
+  position: absolute;
+}
+
+.splitter::before {
+  inset: 0 -1px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.splitter::after { inset: 0 -5px; }
+
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.dragging::before {
+  opacity: 1;
+}
+
+/* While dragging, keep the resize cursor everywhere and stop the drag from
+   selecting text in the console. */
+body.resizing-cols, body.resizing-cols * { cursor: col-resize !important; }
+body.resizing-rows, body.resizing-rows * { cursor: row-resize !important; }
+body.resizing-cols, body.resizing-rows { user-select: none; }
 
 .pane-header {
   padding: 10px 16px;
@@ -244,6 +325,13 @@ body {
   margin-top: 6px;
 }
 
+.console-line.stopped-line {
+  color: var(--error);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  margin-top: 6px;
+}
+
 /* ---- input row ------------------------------------------------------- */
 
 .input-row {
@@ -265,6 +353,7 @@ body {
 
 .input-field {
   flex: 1;
+  min-width: 0; /* a text input won't shrink below its default width otherwise */
   background: var(--panel-alt);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -294,7 +383,12 @@ body {
 
 @media (max-width: 760px) {
   .workspace { flex-direction: column; }
-  .editor-pane { border-right: none; border-bottom: 1px solid var(--border); }
+  /* The panes stack, so the splitter turns horizontal and sets heights. */
+  .pane { min-height: 0; }
+  .console-pane { min-width: 0; min-height: 140px; }
+  .splitter { cursor: row-resize; }
+  .splitter::before { inset: -1px 0; }
+  .splitter::after { inset: -5px 0; }
 }
 
 /* The assignment operator "<-" drawn as one arrow, in the editor (a Monaco
