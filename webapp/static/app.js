@@ -110,9 +110,63 @@ function initializeEditor(monaco) {
     "suggestWidgetVisible && textInputFocus",
   );
 
+  const arrowDecorations = editor.createDecorationsCollection();
+  const refreshArrows = () => {
+    arrowDecorations.set(findAssignmentArrows(editor.getModel(), monaco));
+  };
+  editor.onDidChangeModelContent(refreshArrows);
+  refreshArrows();
+
   runBtn.disabled = false;
   setStatus("", "Idle");
   editor.focus();
+}
+
+// ---- assignment arrow ----------------------------------------------
+//
+// "<-" is drawn as a single arrow (see .assign-arrow in style.css). Only the
+// drawing changes: the text stays the two characters "<-", occupying the same
+// two columns, so the cursor, selection, copy/paste, the source sent to the
+// server and the error column spans it sends back are all unaffected.
+
+// Columns (0-based) of every "<-" on one line that is an assignment arrow,
+// skipping any inside a string, CHAR literal or comment. "<--" is left as
+// typed, because the engine reports it as a typo.
+function assignmentArrowColumns(line) {
+  const columns = [];
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === '"' || ch === "'") {
+      const close = line.indexOf(ch, i + 1);
+      if (close < 0) break;
+      i = close + 1;
+    } else if (ch === "<" && line[i + 1] === "-") {
+      if (line[i + 2] !== "-") columns.push(i);
+      i += 2;
+    } else {
+      i += 1;
+    }
+  }
+  return columns;
+}
+
+function findAssignmentArrows(model, monaco) {
+  const decorations = [];
+  const options = {
+    inlineClassName: "assign-arrow",
+    stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+  };
+  for (let line = 1; line <= model.getLineCount(); line++) {
+    for (const column of assignmentArrowColumns(model.getLineContent(line))) {
+      decorations.push({
+        range: new monaco.Range(line, column + 1, line, column + 3),
+        options,
+      });
+    }
+  }
+  return decorations;
 }
 
 if (typeof window.require !== "function") {
@@ -225,6 +279,7 @@ const _HIGHLIGHT_RULES = [
   [/^"[^"\r\n]*"/, "string"],
   [/^\d+\.\d+/, "number"],
   [/^\d+/, "number"],
+  [/^<-(?!-)/, "assign"], // drawn as an arrow, like in the editor
   [/^(?:<-|\u2190|<>|<=|>=|[+\-*/%^=<>])/, "operator"],
   [/^[()[\]{},:]/, "delimiter"],
   [/^[A-Za-z_][A-Za-z0-9_]*/, "word"], // resolved to a specific token type below
@@ -240,6 +295,7 @@ function highlightPseudocodeLine(line) {
     const span = document.createElement("span");
     const color = tokenType && themeColorFor(tokenType);
     if (color) span.style.color = color;
+    if (tokenType === "assign") span.className = "assign-arrow";
     span.textContent = text;
     frag.appendChild(span);
   };
