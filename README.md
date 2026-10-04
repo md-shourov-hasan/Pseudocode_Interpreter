@@ -353,9 +353,7 @@ Notes for operators:
 ## Tests
 
 The test suite is written with pytest and covers the lexer, parser,
-interpreter, file handling, runtime safety and the web API. The `tests/`
-directory is listed in `.gitignore`, so it is **not included in this
-repository**. With a copy of it in place, run:
+interpreter, file handling, runtime safety and the web API. Run it with:
 
 ```bash
 python -m pytest tests/ -v

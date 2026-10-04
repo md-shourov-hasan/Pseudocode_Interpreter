@@ -189,3 +189,47 @@ def test_and_has_higher_precedence_than_or_without_parens():
         'IF TRUE OR TRUE AND FALSE\nTHEN\nOUTPUT "yes"\nELSE\nOUTPUT "no"\nENDIF'
     )
     assert output == ["yes"]
+
+
+# ---- INPUT into a CONSTANT ----------------------------------------------
+
+def test_input_cannot_overwrite_a_constant():
+    with pytest.raises(PseudocodeError, match="CONSTANT and cannot be reassigned"):
+        run_src("CONSTANT Pi <- 3\nINPUT Pi", inputs=["99"])
+
+
+# ---- lexer/parser never leak a raw Python exception ---------------------
+
+def test_non_ascii_digit_is_an_unexpected_character():
+    with pytest.raises(PseudocodeError, match="Unexpected character"):
+        run_src("DECLARE X : INTEGER\nX <- ²")
+
+
+def test_ascii_digits_followed_by_non_ascii_digit_is_reported():
+    with pytest.raises(PseudocodeError):
+        run_src("DECLARE X : INTEGER\nX <- 1²")
+
+
+def test_deeply_nested_brackets_report_a_pseudocode_error():
+    with pytest.raises(PseudocodeError, match="nested too deeply"):
+        run_src("OUTPUT " + "(" * 3000 + "1" + ")" * 3000)
+
+
+# ---- "=" / "<>" between unrelated types ---------------------------------
+
+@pytest.mark.parametrize("expr", ['TRUE = 1', '"a" = 1', '"a" <> 1', "FALSE <> 0", '"TRUE" = TRUE'])
+def test_equality_between_unrelated_types_is_an_error(expr):
+    with pytest.raises(PseudocodeError, match="Can't compare"):
+        run_src(f"OUTPUT {expr}")
+
+
+def test_equality_still_works_within_a_type_group():
+    output, _ = run_src('OUTPUT 1 = 1.0, "a" = \'a\', TRUE = TRUE, 2 <> 3')
+    assert output == ["TRUETRUETRUETRUE"]
+
+
+# ---- INTEGER too large to print -----------------------------------------
+
+def test_output_of_huge_integer_gives_a_clear_message():
+    with pytest.raises(PseudocodeError, match="too large to display"):
+        run_src("OUTPUT 10 ^ 5000")

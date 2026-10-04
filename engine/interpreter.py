@@ -625,6 +625,13 @@ class Interpreter:
                 end_column=stmt.target.end_column,
             )
         self._ensure_scalar(symbol, name, stmt.line, stmt.target.column, stmt.target.end_column)
+        if symbol.is_constant:
+            raise PseudocodeError(
+                stmt.line,
+                f"'{name}' is a CONSTANT and cannot be reassigned.",
+                column=stmt.target.column,
+                end_column=stmt.target.end_column,
+            )
         raw = self._input_fn()
         try:
             value = self._coerce_input(raw, symbol.data_type)
@@ -1221,6 +1228,16 @@ class Interpreter:
 
     def _eval_relational(self, op, left, right, node):
         line, column, end_column = node.line, node.column, node.end_column
+        # "=" and "<>" never raise in Python, so without this check comparing
+        # values of unrelated types (TRUE = 1, "a" = 1) would quietly give an
+        # answer instead of the error the ordering operators already report.
+        if op in ("=", "<>") and self._comparison_kind(left) != self._comparison_kind(right):
+            raise PseudocodeError(
+                line,
+                f"Can't compare {self._type_name(left)} and {self._type_name(right)} with '{op}'.",
+                column=column,
+                end_column=end_column,
+            )
         try:
             if op == "=":
                 return left == right
@@ -1241,6 +1258,16 @@ class Interpreter:
                 column=column,
                 end_column=end_column,
             )
+
+    @staticmethod
+    def _comparison_kind(value) -> str:
+        """Which values can be compared for equality with each other:
+        INTEGER with REAL, and STRING with CHAR, but nothing across groups."""
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        return "text"
 
     def _eval_call(self, node: ast.Call):
         """name(arg1, ...) -- a built-in (FR-4.3 etc.) or user-defined
@@ -1507,7 +1534,13 @@ class Interpreter:
             return "TRUE" if value else "FALSE"
         if isinstance(value, float):
             return self._format_real(value)
-        return str(value)
+        try:
+            return str(value)
+        except ValueError:
+            # Python refuses to convert an INTEGER with thousands of digits to text.
+            raise PseudocodeError(
+                self._current_line, "This INTEGER value is too large to display."
+            ) from None
 
     def _format_real(self, value: float) -> str:
         """REAL values print with up to 5 decimal places, trimming
