@@ -370,3 +370,14 @@ python -m pytest tests/ -v
   interface or the Python API above.
 - Array elements are stored eagerly in a dictionary, which is simple and
   adequate for student programs but not memory-efficient.
+
+## License
+
+Copyright (C) 2026 MD SHOUROV HASAN
+
+This project is licensed under the
+[GNU Affero General Public License v3.0](LICENSE). You are free to use,
+study, modify and share it, including in schools and classrooms. If you
+distribute a modified version, or run one as a web service that other
+people use, you must make your modified source code available under the
+same license.
